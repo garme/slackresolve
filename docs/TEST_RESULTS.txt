@@ -1,0 +1,21 @@
+bash tests/run.sh
+Building real ELF fixtures...
+PASS check-installed-program
+PASS healthy-installed-program
+PASS complete-system-audit
+PASS recursive-package-plan
+PASS generic-file-search-recursive
+PASS generic-data-file-search
+PASS generic-file-provider-preference
+PASS dry-run-apply-and-verify
+PASS safe-package-upgrade
+PASS block-upgrade-breaking-old-program
+PASS parallel-versions-without-collisions
+PASS alternative-provider-preference
+PASS reject-unknown-install-script
+PASS official-slackpkg-download-contract
+PASS reject-stale-system-plan
+PASS dialog-package-workflow
+PASS command-interface
+
+17 passed; 0 failed.

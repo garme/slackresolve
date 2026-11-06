@@ -1,0 +1,267 @@
+# SPDX-License-Identifier: GPL-3.0-only
+sr_issue() {
+    sr_record ISSUE "$1" "$2" "$3" "$4" >> "$SR_WORK/issues"
+    if [[ -z ${FIRST_CODE:-} ]]; then FIRST_CODE=$1; FIRST_PATH=$2; FIRST_NEED=$3; FIRST_REASON=$4; fi
+}
+sr_collect_system_roots() {
+    AUDIT_ROOTS=()
+    local path physical
+    while IFS= read -r path; do
+        physical=${SR_ROOT%/}$path
+        [[ -f $physical ]] || continue
+        sr_elf "$physical" || continue
+        [[ -n ${M_NEEDED[$E_ID]:-} || -n ${M_INTERP[$E_ID]:-} ]] || continue
+        AUDIT_ROOTS+=("$path")
+    done < <(printf '%s\n' "${!OWN[@]}" | sort -u)
+}
+sr_package_actions() {
+    local id line kind path owner base previous matched
+    for id in "${SELECTED[@]}"; do
+        PK_PREVIOUS["$id"]=; PK_ACTION["$id"]=install
+        if [[ ${INST_FULL[${PK_FULL[$id]}]+yes} ]]; then
+            PK_ACTION["$id"]=keep
+            continue
+        fi
+        base=${PK_BASE[$id]}; previous=; matched=0
+        while IFS= read -r line; do
+            sr_fields "$line"; kind=${F[0]}; path=${F[1]}
+            [[ $kind == F || $kind == L ]] || continue
+            owner=${OWN[$path]:-}; [[ -n $owner ]] || continue
+            sr_package_name "$owner" || continue
+            [[ $P_BASE == "$base" ]] || continue
+            if [[ -z $previous ]]; then previous=$owner
+            elif [[ $previous != "$owner" ]]; then matched=2; break
+            fi
+            matched=1
+        done < "${PK_DIR[$id]}/files"
+        if (( matched == 2 )); then
+            sr_issue conflict '' "${PK_FULL[$id]}" 'Several installed versions own paths replaced by this package.'
+        elif (( matched == 1 )); then
+            PK_ACTION["$id"]=upgrade; PK_PREVIOUS["$id"]=$previous
+            SR_AUDIT_SYSTEM=1
+        fi
+    done
+}
+sr_overlay() {
+    OV_TYPE=(); OV_SOURCE=(); OV_OWNER=(); SELECTED_SET=()
+    local id line kind path target mode source physical hash existing same installed
+    sr_package_actions
+    for id in "${SELECTED[@]}"; do
+        SELECTED_SET["$id"]=1
+        installed=${INST_BASE[${PK_BASE[$id]}]:-}
+        if [[ ${PK_SCRIPT[$id]} == unconfirmed ]]; then
+            sr_issue unconfirmed /install/doinst.sh "${PK_FULL[$id]}" 'The installation script contains effects outside the supported declarative subset.'
+        fi
+        while IFS= read -r line; do
+            sr_fields "$line"; kind=${F[0]}; path=${F[1]}; target=${F[2]}; mode=${F[3]}
+            [[ $kind == F || $kind == L || $kind == D ]] || continue
+            [[ $path != /install && $path != /install/* ]] || continue
+            sr_norm "$path"; path=$REPLY
+            if [[ $kind == F && $mode == *[sS]* ]]; then sr_issue unconfirmed "$path" "${PK_FULL[$id]}" 'Set-ID execution requires a separate loader profile.'; fi
+            if [[ $kind == L ]]; then source=$target; else source=${PK_DIR[$id]}/root$path; fi
+            if [[ ${OV_TYPE[$path]+yes} ]]; then
+                if [[ $kind == D && ${OV_TYPE[$path]} == D ]]; then continue; fi
+                same=0
+                if [[ $kind == F && ${OV_TYPE[$path]} == F ]]; then cmp -s -- "$source" "${OV_SOURCE[$path]}" && same=1
+                elif [[ $kind == L && ${OV_TYPE[$path]} == L && $source == "${OV_SOURCE[$path]}" ]]; then same=1; fi
+                if (( ! same )); then sr_issue collision "$path" "${PK_FULL[$id]}" 'Selected packages would overwrite different files or links.'; fi
+                continue
+            fi
+            if sr_lookup "$path" 1; then
+                same=0
+                if [[ $kind == D && $V_TYPE == D ]]; then same=1
+                elif [[ $kind == F && $V_TYPE == F ]] && cmp -s -- "$source" "$V_FILE"; then same=1
+                elif [[ $kind == L && -L ${SR_ROOT%/}$path && $(readlink -- "${SR_ROOT%/}$path") == "$target" ]]; then same=1; fi
+                if [[ ${PK_ACTION[$id]} == upgrade && $V_OWNER == "${PK_PREVIOUS[$id]}" ]]; then
+                    sr_guard "$path"
+                elif (( ! same )); then
+                    sr_issue preserve "$path" "${PK_FULL[$id]}" "Existing file is preserved (owner: ${OWN[$path]:-unmanaged}); parallel installation is not safe."
+                fi
+            else
+                sr_guard "$path"
+                if [[ -n $installed && $installed == "${PK_FULL[$id]}" && $kind != D ]]; then
+                    sr_issue stale "$path" "$installed" 'An installed package record exists but its payload is missing or incomplete.'
+                fi
+                if [[ -e ${SR_ROOT%/}$path || -L ${SR_ROOT%/}$path ]]; then
+                    sr_issue collision "$path" "${PK_FULL[$id]}" 'Existing path could not be modeled.'
+                fi
+            fi
+            OV_TYPE["$path"]=$kind; OV_SOURCE["$path"]=$source; OV_OWNER["$path"]=$id
+        done < "${PK_DIR[$id]}/files"
+    done
+    # Do not authorize an archive that writes through one of its own symlinks.
+    for path in "${!OV_TYPE[@]}"; do
+        local ancestor=${path%/*}
+        if [[ ${OV_TYPE[$path]} == L && -n $ancestor && $ancestor != / ]]; then
+            if ! sr_lookup "$ancestor" || [[ $V_TYPE != D ]]; then
+                sr_issue unconfirmed "$path" '' 'The link installation directory is not present in the modeled filesystem.'
+            fi
+        fi
+        while [[ -n $ancestor && $ancestor != / ]]; do
+            if [[ ${OV_TYPE[$ancestor]:-} == L ]]; then sr_issue unconfirmed "$path" '' 'An archive path has a planned symlink ancestor.'; break; fi
+            ancestor=${ancestor%/*}
+        done
+    done
+    # A second global provider with the same SONAME may change ldconfig's choice.
+    local soname eid prior oldfile oldid dir global
+    for id in "${SELECTED[@]}"; do
+        while IFS= read -r line; do
+            sr_fields "$line"; path=${F[0]}; eid=${F[1]}
+            sr_elf "${PK_DIR[$id]}/root$path" || continue
+            soname=${M_SONAME[$eid]:-}; [[ -n $soname ]] || continue
+            global=0
+            for dir in "${LD_PATHS[@]}"; do [[ ${path%/*} == "$dir" ]] && global=1; done
+            (( global )) || continue
+            for dir in "${LD_PATHS[@]}"; do
+                prior=$dir/$soname
+                sr_lookup "$prior" 1 || continue
+                [[ $V_TYPE == F ]] || continue
+                oldfile=$V_FILE
+                if [[ ${PK_ACTION[$id]} == upgrade && ${OWN[$prior]:-} == "${PK_PREVIOUS[$id]}" ]]; then
+                    : # The full installed-system audit below checks old consumers.
+                elif ! cmp -s -- "$oldfile" "${PK_DIR[$id]}/root$path"; then
+                    sr_issue preserve "$prior" "$soname" 'An installed global SONAME would be shadowed. Keep it and use a supported private-library context.'
+                fi
+            done
+        done < "${PK_ELFS[$id]}"
+    done
+}
+sr_graph() {
+    : > "$SR_WORK/issues"; : > "$SR_WORK/edges"
+    FIRST_CODE=; FIRST_PATH=; FIRST_NEED=; FIRST_REASON=
+    sr_overlay
+    if [[ ${SR_AUDIT_SYSTEM:-0} == 1 ]]; then sr_collect_system_roots; fi
+    declare -a qpath=() qinherit=()
+    declare -A visited=() reached=()
+    local id line path eid source index=0 inherit nextinherit needed key count=0 seed=0
+    for id in "${SELECTED[@]}"; do
+        while IFS= read -r line; do
+            sr_fields "$line"; path=${F[0]}
+            sr_elf "${PK_DIR[$id]}/root$path" || continue; eid=$E_ID
+            if [[ ${M_TYPE[$eid]} == EXEC || -n ${M_INTERP[$eid]:-} ]]; then
+                qpath+=("$path"); qinherit+=(""); ((seed+=1))
+            fi
+        done < "${PK_ELFS[$id]}"
+    done
+    for path in "${AUDIT_ROOTS[@]}"; do
+        qpath+=("$path"); qinherit+=(""); ((seed+=1))
+    done
+    local phase=0
+    while :; do
+        while (( index < ${#qpath[@]} )); do
+            path=${qpath[$index]}; inherit=${qinherit[$index]}; ((index+=1))
+            key=$path$'\t'$inherit
+            [[ ${visited[$key]+yes} ]] && continue
+            visited["$key"]=1; reached["$path"]=1; ((count+=1))
+            if (( count > 10000 )); then sr_issue unconfirmed "$path" '' 'Dependency graph limit reached.'; break; fi
+            sr_lookup "$path" || { sr_issue missing "$path" "$path" 'Object or link target not found.'; continue; }
+            source=$V_FILE
+            sr_elf "$source" || { sr_issue incompatible "$path" '' 'Object is not a readable ELF file.'; continue; }
+            eid=$E_ID
+            if [[ ${M_CLASS[$eid]} != ELF64 || ${M_MACHINE[$eid]} != 'Advanced Micro Devices X86-64' ]]; then
+                sr_issue incompatible "$path" '' 'Only x86_64 ELF64 objects are supported in this release.'; continue
+            fi
+            if [[ ${M_FLAGS[$eid]:-} == *UNMODELED* ]]; then sr_issue unconfirmed "$path" '' 'Unsupported dynamic-loader tag.'; fi
+            nextinherit=$inherit
+            if [[ -z ${M_RUNPATH[$eid]:-} && -n ${M_RPATH[$eid]:-} ]]; then
+                if sr_expand_paths "${M_RPATH[$eid]}" "$path"; then nextinherit=$REPLY$inherit
+                else sr_issue unconfirmed "$path" '' 'Relative or unsupported RPATH.'; fi
+            fi
+            local -a needs=()
+            [[ -z ${M_INTERP[$eid]:-} ]] || needs+=("${M_INTERP[$eid]}")
+            while IFS= read -r needed; do [[ -z $needed ]] || needs+=("$needed"); done <<< "${M_NEEDED[$eid]:-}"
+            for needed in "${needs[@]}"; do
+                if sr_dependency "$path" "$eid" "$needed" "$inherit"; then
+                    sr_record EDGE "$path" "$needed" "$DEP_PATH" "$DEP_OWNER" resolved "$DEP_EID" >> "$SR_WORK/edges"
+                    qpath+=("$DEP_PATH"); qinherit+=("$nextinherit")
+                else
+                    sr_record EDGE "$path" "$needed" '' '' "$DEP_STATUS" "$DEP_REASON" >> "$SR_WORK/edges"
+                    sr_issue "$DEP_STATUS" "$path" "$needed" "$DEP_REASON"
+                    if [[ $FIRST_CODE == missing && $FIRST_PATH == "$path" && $FIRST_NEED == "$needed" ]]; then FIRST_EID=$eid; fi
+                fi
+            done
+        done
+        (( phase == 0 )) || break
+        phase=1
+        # Libraries not reached from an executable are still inspected, with an
+        # explicit standalone context; unresolved plugin contexts remain pending.
+        for id in "${SELECTED[@]}"; do
+            while IFS= read -r line; do
+                sr_fields "$line"; path=${F[0]}
+                [[ ${reached[$path]+yes} ]] && continue
+                qpath+=("$path"); qinherit+=(""); ((seed+=1))
+            done < "${PK_ELFS[$id]}"
+        done
+    done
+    # A data-only package has no ELF dependency edges. Its package operation
+    # remains valid, while non-ELF runtime requirements stay outside coverage.
+    [[ ! -s $SR_WORK/issues ]]
+}
+sr_selection_save() { printf '%s\n' "${SELECTED[@]}"; }
+sr_selection_restore() {
+    SELECTED=(); local value
+    while IFS= read -r value; do [[ -z $value ]] || SELECTED+=("$value"); done <<< "$1"
+}
+sr_solve() {
+    local depth=$1 checkpoint candidates rank id tier= tier_before= before after code need consumer
+    ((SR_SEARCH_COUNT+=1))
+    if (( SR_SEARCH_COUNT > SR_MAX_SEARCH || depth > 64 )); then SR_LIMIT_HIT=1; return; fi
+    checkpoint=$(sr_selection_save)
+    if sr_graph; then
+        local signature
+        signature=$(printf '%s\n' "${SELECTED[@]}" | sort | sha256sum); signature=${signature:0:64}
+        printf '%s\n' "$checkpoint" > "$SR_WORK/solution.$signature"
+        return 0
+    fi
+    if (( depth > SR_BEST_DEPTH )); then
+        SR_BEST_DEPTH=$depth; SR_BEST_SELECTED=$checkpoint
+        cp -- "$SR_WORK/issues" "$SR_WORK/best-issues"
+    fi
+    code=$FIRST_CODE; need=$FIRST_NEED; consumer=${FIRST_EID:-}
+    if [[ $code != missing || $need == */* || -z $consumer || ${SR_OFFLINE:-0} == 2 ]]; then return 0; fi
+    sr_candidates "$need" "$consumer"
+    candidates=$(cat "$SR_WORK/candidates")
+    before=$(find "$SR_WORK" -maxdepth 1 -name 'solution.*' -type f | wc -l)
+    while IFS=$'\t' read -r rank id; do
+        [[ -n $id ]] || continue
+        if [[ -n $tier && $rank != "$tier" ]]; then
+            after=$(find "$SR_WORK" -maxdepth 1 -name 'solution.*' -type f | wc -l)
+            (( after > before )) && break
+        fi
+        tier=$rank
+        sr_selection_restore "$checkpoint"
+        [[ $'\n'$checkpoint$'\n' == *$'\n'$id$'\n'* ]] && continue
+        SELECTED+=("$id")
+        sr_solve "$((depth+1))"
+        (( SR_LIMIT_HIT == 0 )) || break
+    done <<< "$candidates"
+    sr_selection_restore "$checkpoint"
+    return 0
+}
+sr_toposort() {
+    local line consumer provider from to id path
+    : > "$SR_WORK/order-input"
+    for id in "${SELECTED[@]}"; do printf 'N\t%s\n' "$id" >> "$SR_WORK/order-input"; done
+    while IFS= read -r line; do
+        sr_fields "$line"; consumer=${F[1]}; provider=${F[4]}
+        [[ -n $provider && ${SELECTED_SET[$provider]+yes} ]] || continue
+        from=${OV_OWNER[$consumer]:-}; [[ -n $from && $from != "$provider" ]] || continue
+        printf 'E\t%s\t%s\n' "$from" "$provider" >> "$SR_WORK/order-input"
+    done < "$SR_WORK/edges"
+    awk -F '\t' '
+        $1=="N" {nodes[$2]=1}
+        $1=="E" {edge[$2 SUBSEP $3]=1}
+        END {
+            for(n in nodes)count++
+            while(donecount<count) {
+                best=""
+                for(n in nodes)if(!(n in done)) {
+                    blocked=0
+                    for(e in edge){split(e,a,SUBSEP);if(a[1]==n && !(a[2] in done))blocked=1}
+                    if(!blocked && (best==""||n<best))best=n
+                }
+                if(best=="")exit 2
+                print best;done[best]=1;donecount++
+            }
+        }' "$SR_WORK/order-input" > "$SR_WORK/order"
+}

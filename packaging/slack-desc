@@ -1,0 +1,12 @@
+slackresolve: slackresolve (Slackware ELF dependency resolver)
+slackresolve:
+slackresolve: SlackResolve finds packages containing missing files, checks
+slackresolve: programs, audits the complete system, and analyzes packages. It
+slackresolve: official slackpkg indexes, follows dependencies recursively, and
+slackresolve: creates reviewable plans. Plans use installpkg for additions and
+slackresolve: upgradepkg for approved replacements. Includes a dialog interface.
+slackresolve:
+slackresolve: No Python runtime or publisher dependency metadata is required.
+slackresolve: dialog is optional for CLI use and required for the terminal interface.
+slackresolve:
+slackresolve:

@@ -1,0 +1,58 @@
+.TH SLACKRESOLVE 8 "2026-11-06" "SlackResolve 0.3.1"
+.SH NAME
+slackresolve \- find and install missing Slackware ELF dependencies
+.SH SYNOPSIS
+.B slackresolve check-program
+PROGRAM [--output PLAN] [options]
+.br
+.B slackresolve search-file
+FILE [--output PLAN] [options]
+.br
+.B slackresolve check-system
+[--output PLAN] [options]
+.br
+.B slackresolve install
+PACKAGE|ARCHIVE [--output PLAN] [options]
+.br
+.B slackresolve show
+PLAN
+.br
+.B slackresolve apply
+PLAN [--dry-run]
+.br
+.B slackresolve verify
+PLAN
+.SH DESCRIPTION
+SlackResolve locates exact filenames or package paths, examines dynamic ELF requirements, searches official Slackware package contents through slackpkg, follows provider dependencies recursively, and saves exact package archives in a reviewable plan.
+.PP
+Planning never installs packages. Applying a ready plan uses installpkg for additions and upgradepkg for replacements. Installed ELF consumers are checked before an upgrade is approved. Parallel package versions are accepted only when their files and library identities do not conflict.
+.SH OPTIONS
+.TP
+.BI --repo " DIR|slackpkg"
+Use a local package tree or the official indexes configured for slackpkg.
+.TP
+.BI --output " FILE"
+Save a plan and its adjacent FILE.d archive directory.
+.TP
+.BI --root " DIR"
+Analyze a target root instead of /.
+.TP
+.BI --cache " DIR"
+Use an alternate analysis cache.
+.TP
+.BI --prefer " NAME[,NAME]"
+Prefer named packages when several compatible providers exist.
+.TP
+.B --dry-run
+Validate and print apply operations without modifying the target.
+.SH FILES
+.I /var/lib/pkgtools/packages
+installed package records.
+.br
+.I /var/lib/slackpkg
+official slackpkg indexes.
+.br
+.I /var/cache/packages
+archives downloaded by slackpkg.
+.SH SEE ALSO
+slackpkg(8), installpkg(8), upgradepkg(8), ldconfig(8), readelf(1), dialog(1)

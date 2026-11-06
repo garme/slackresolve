@@ -1,0 +1,177 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+set -o pipefail
+SR_BINDIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+if [[ -f $SR_BINDIR/../lib/common.sh ]]; then SR_LIBDIR=$SR_BINDIR/../lib
+else SR_LIBDIR=${SLACKRESOLVE_LIBDIR:-/usr/libexec/slackresolve/lib}; fi
+for sr_module in common elf archive repository loader solver plan; do
+    source "$SR_LIBDIR/$sr_module.sh" || exit 1
+done
+sr_help() {
+    cat <<'EOF'
+SlackResolve - find and install missing Slackware ELF dependencies
+
+Usage:
+  slackresolve check-program PROGRAM [--output PLAN] [options]
+  slackresolve search-file FILE [--output PLAN] [options]
+  slackresolve check-system [--output PLAN] [options]
+  slackresolve install PACKAGE|PACKAGE.txz [--output PLAN] [options]
+  slackresolve show PLAN
+  slackresolve apply PLAN [--dry-run]
+  slackresolve verify PLAN
+  slackresolve doctor [options]
+
+Options:
+  --repo DIR|slackpkg      Official slackpkg indexes or a local package tree.
+  --output FILE            Save an actionable plan and its FILE.d archives.
+  --root DIR               Target root (default: /).
+  --cache DIR              Analysis and download cache.
+  --prefer NAME[,NAME]     Preferred provider when alternatives exist.
+  --blacklist FILE         Package exclusion expressions.
+  --slackpkg-data DIR      slackpkg indexes (default: /var/lib/slackpkg).
+  --slackpkg-cache DIR     downloaded packages (default: /var/cache/packages).
+  --max-candidates N       Maximum provider archives examined (default: 64).
+  --max-search N           Maximum dependency selections examined (default: 128).
+  --dry-run                Validate an apply plan without changing the target.
+  --version                Print the version.
+
+Planning never installs packages. Apply uses installpkg for additions and
+upgradepkg for replacements. Parallel versions are allowed only when their
+files and global library identities do not conflict.
+EOF
+}
+[[ ${1:-} != --version ]] || { printf 'SlackResolve %s\n' "$SR_VERSION"; exit; }
+[[ $# -gt 0 && ${1:-} != --help && ${1:-} != -h ]] || { sr_help; exit; }
+SR_COMMAND=$1; shift
+SR_ROOT=/; SR_ROOT_SET=0; SR_REPO=slackpkg; SR_OUTPUT=; SR_MAX_CANDIDATES=64; SR_MAX_SEARCH=128
+SR_DRY_RUN=0; SR_PREFER=; SR_AUDIT_SYSTEM=0
+declare -a SR_INPUTS=()
+while (( $# )); do
+    case $1 in
+        --root|--repo|--cache|--blacklist|--prefer|--slackpkg-data|--slackpkg-cache|--max-candidates|--max-search|--output)
+            (( $# >= 2 )) || sr_die "Missing value: $1"
+            case $1 in
+                --root) SR_ROOT=$2; SR_ROOT_SET=1;; --repo) SR_REPO=$2;; --cache) SR_CACHE=$2;;
+                --blacklist) SR_BLACKLIST=$2;; --prefer) SR_PREFER=$2;;
+                --slackpkg-data) SR_SLACK_DATA=$2;; --slackpkg-cache) SR_SLACK_CACHE=$2;;
+                --max-candidates) SR_MAX_CANDIDATES=$2;; --max-search) SR_MAX_SEARCH=$2;; --output) SR_OUTPUT=$2;;
+            esac; shift 2;;
+        --dry-run) SR_DRY_RUN=1; shift;;
+        --help|-h) sr_help; exit;;
+        --) shift; SR_INPUTS+=("$@"); break;;
+        -*) sr_die "Unknown option: $1";;
+        *) SR_INPUTS+=("$1"); shift;;
+    esac
+done
+[[ $SR_MAX_CANDIDATES =~ ^[1-9][0-9]*$ && $SR_MAX_SEARCH =~ ^[1-9][0-9]*$ ]] || sr_die 'Search limits must be positive integers.'
+
+case $SR_COMMAND in
+    show|apply|verify)
+        (( ${#SR_INPUTS[@]} == 1 )) || sr_die 'Supply exactly one plan file.'
+        sr_plan_read "${SR_INPUTS[0]}"
+        if (( SR_ROOT_SET )); then
+            sr_norm "$SR_ROOT"; [[ ${REPLY%/} == "${PLAN_META[root]%/}" ]] || sr_die 'Target root differs from the saved plan.'
+        else SR_ROOT=${PLAN_META[root]}; fi
+        if [[ $SR_COMMAND == show ]]; then sr_explain; exit; fi
+        sr_init
+        if [[ $SR_COMMAND == apply ]]; then sr_apply; else sr_check; fi
+        exit $?;;
+    doctor)
+        (( ${#SR_INPUTS[@]} == 0 )) || sr_die 'doctor does not take a package or program.'
+        sr_init
+        printf 'SlackResolve %s\nTarget: %s\nRelease: %s\nPackage records: %s\n' "$SR_VERSION" "$SR_ROOT" "$SR_RELEASE" "${SR_PKGDB:-not found}"
+        for sr_tool in bash awk readelf tar sha256sum flock ldconfig slackpkg installpkg upgradepkg dialog; do
+            if command -v "$sr_tool" >/dev/null; then printf 'AVAILABLE: %s\n' "$sr_tool"; else printf 'UNAVAILABLE: %s\n' "$sr_tool"; fi
+        done
+        [[ -f ${SR_SLACK_DATA:-/var/lib/slackpkg}/pkglist ]] && printf 'Slackpkg indexes: available\n' || printf 'Slackpkg indexes: unavailable; run slackpkg update.\n'
+        exit 0;;
+    check-program) (( ${#SR_INPUTS[@]} == 1 )) || sr_die 'Supply exactly one installed program.';;
+    search-file) (( ${#SR_INPUTS[@]} == 1 )) || sr_die 'Supply exactly one filename or absolute package path.';;
+    check-system) (( ${#SR_INPUTS[@]} == 0 )) || sr_die 'check-system does not take a program.';;
+    install) (( ${#SR_INPUTS[@]} == 1 )) || sr_die 'Supply one local archive or exact official package name.';;
+    *) sr_die "Unknown command: $SR_COMMAND";;
+esac
+
+sr_init
+[[ $SR_RELEASE != unknown ]] || sr_log 'Warning: the target was not identified as Slackware.'
+sr_progress 5 'Reading official package indexes...'
+sr_repo_load
+
+if [[ $SR_COMMAND == search-file ]]; then
+    sr_query=${SR_INPUTS[0]}
+    [[ -n $sr_query ]] || sr_die 'The search filename is empty.'
+    sr_control_path "$sr_query" || sr_die 'Unsupported characters in search filename.'
+    printf 'Requested file: %s\n' "$sr_query"
+    sr_file_candidates "$sr_query" || sr_die "No official package contains the exact file: $sr_query"
+    printf 'Provider candidates:\n'
+    sr_best_rank=; sr_choice=; sr_count=0
+    while IFS=$'\t' read -r sr_rank sr_id; do
+        printf '  %s\n' "${PK_FULL[$sr_id]}"
+        while IFS= read -r sr_path; do [[ -z $sr_path ]] || printf '    %s\n' "$sr_path"; done <<< "${FILE_MATCHES[$sr_id]}"
+        if [[ -z $sr_best_rank || $sr_rank -lt $sr_best_rank ]]; then
+            sr_best_rank=$sr_rank; sr_choice=$sr_id; sr_count=1
+        elif [[ $sr_rank == "$sr_best_rank" ]]; then ((sr_count+=1)); fi
+    done < "$SR_WORK/file-candidates"
+    (( sr_count == 1 )) || sr_die 'Several equally preferred packages contain this file; rerun with --prefer PACKAGE.'
+    ROOT_PACKAGES+=("$sr_choice"); SELECTED+=("$sr_choice")
+    printf 'Selected provider: %s\n' "${PK_FULL[$sr_choice]}"
+elif [[ $SR_COMMAND == check-program ]]; then
+    sr_norm "${SR_INPUTS[0]}"; sr_physical=$REPLY
+    if [[ $SR_ROOT != / && $sr_physical != "$SR_ROOT"/* ]]; then sr_physical=${SR_ROOT%/}/${SR_INPUTS[0]#/}; fi
+    sr_physical=$(realpath -e -- "$sr_physical") || sr_die 'Program not found.'
+    [[ $SR_ROOT == / || $sr_physical == "$SR_ROOT"/* ]] || sr_die 'Program is outside the target root.'
+    sr_logical=${sr_physical#"${SR_ROOT%/}"}; [[ $sr_logical == /* ]] || sr_logical=/$sr_logical
+    sr_elf "$sr_physical" || sr_die 'The selected file is not a readable ELF program.'
+    [[ -n ${M_NEEDED[$E_ID]:-} || -n ${M_INTERP[$E_ID]:-} ]] || sr_die 'The selected ELF has no dynamic runtime dependencies.'
+    AUDIT_ROOTS=("$sr_logical")
+    printf 'Program: %s\n' "$sr_logical"
+elif [[ $SR_COMMAND == check-system ]]; then
+    [[ -n $SR_PKGDB ]] || sr_die 'No Slackware package database was found.'
+    SR_AUDIT_SYSTEM=1
+    sr_collect_system_roots
+    printf 'Installed ELF objects with runtime requirements: %s\n' "${#AUDIT_ROOTS[@]}"
+else
+    sr_input=${SR_INPUTS[0]}
+    if [[ -f $sr_input ]]; then sr_archive "$sr_input" || sr_die "Cannot inspect package: $sr_input"
+    else sr_repo_input "$sr_input" || sr_die "Official package not found or ambiguous: $sr_input"; fi
+    sr_blocked "${PK_FULL[$A_ID]}" && sr_die "Excluded by blacklist: ${PK_FULL[$A_ID]}"
+    ROOT_PACKAGES+=("$A_ID"); SELECTED+=("$A_ID")
+    printf 'Requested package: %s\n' "${PK_FULL[$A_ID]}"
+fi
+
+sr_progress 25 'Checking libraries and locating official provider packages...'
+sr_solve 0
+mapfile -t SR_SOLUTIONS < <(find "$SR_WORK" -maxdepth 1 -type f -name 'solution.*' | sort)
+if (( ${#SR_SOLUTIONS[@]} == 1 && SR_LIMIT_HIT == 0 )); then
+    sr_selection_restore "$(cat "${SR_SOLUTIONS[0]}")"
+    sr_graph || :
+else
+    sr_selection_restore "${SR_BEST_SELECTED:-$(printf '%s\n' "${ROOT_PACKAGES[@]}")}"
+    sr_graph || :
+    if (( ${#SR_SOLUTIONS[@]} > 1 )); then sr_issue ambiguous '' '' 'Several complete provider selections exist; use --prefer with a package name.'; fi
+    if (( SR_LIMIT_HIT )); then sr_issue unconfirmed '' '' 'The search limit was reached; completeness was not established.'; fi
+fi
+
+SR_STATUS=ready
+if (( ${#SELECTED[@]} )); then
+    if ! sr_toposort; then sr_issue cycle '' '' 'A package dependency cycle prevents a validated installation order.'; fi
+fi
+[[ ! -s $SR_WORK/issues ]] || SR_STATUS=incomplete
+
+if [[ -n $SR_OUTPUT && ${#SELECTED[@]} -gt 0 ]]; then
+    sr_progress 90 'Saving the plan and exact package archives...'
+    sr_plan_write "$SR_OUTPUT" "$SR_STATUS" || sr_die 'Could not save the plan.'
+    sr_plan_read "$SR_OUTPUT"; sr_explain
+else
+    printf 'Status: %s\n' "$SR_STATUS"
+    if (( ${#SELECTED[@]} == 0 )); then
+        printf 'No package operation is required.\n'
+        [[ -z $SR_OUTPUT ]] || printf 'No plan was written because there are no package operations.\n'
+    else
+        printf 'Package operations:\n'
+        for sr_id in "${SELECTED[@]}"; do printf '  %-8s %s\n' "${PK_ACTION[$sr_id]}" "${PK_FULL[$sr_id]}"; done
+    fi
+    while IFS= read -r sr_line; do sr_fields "$sr_line"; printf 'PENDING %s: %s\n' "${F[1]}" "${F[4]}"; done < "$SR_WORK/issues"
+fi
+sr_progress 100 'Analysis completed.'
+[[ $SR_STATUS == ready ]]

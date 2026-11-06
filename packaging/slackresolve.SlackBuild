@@ -1,0 +1,27 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+set -euo pipefail
+PRGNAM=slackresolve
+VERSION=0.3.1
+BUILD=${BUILD:-1}
+ARCH=noarch
+SRCDIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+OUTPUT=${OUTPUT:-$SRCDIR/dist}
+mkdir -p -- "$OUTPUT"
+OUTPUT=$(cd -- "$OUTPUT" && pwd -P)
+WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/slackresolve-build.XXXXXXXX")
+trap 'rm -rf -- "$WORKDIR"' EXIT
+PKG=$WORKDIR/package
+mkdir -p "$PKG"
+make -C "$SRCDIR" install DESTDIR="$PKG" PREFIX=/usr
+mkdir -p "$PKG/install"
+install -m 644 "$SRCDIR/packaging/slack-desc" "$PKG/install/slack-desc"
+PACKAGE=$OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD.txz
+if command -v makepkg >/dev/null; then
+    (cd "$PKG" && makepkg -l y -c n "$PACKAGE")
+else
+    # All installed entries are regular files/directories; no doinst is needed.
+    [[ -z $(find "$PKG" -type l -print -quit) ]] || { printf 'makepkg is required for packages with symlinks.\n' >&2; exit 1; }
+    tar --sort=name --owner=0 --group=0 --numeric-owner -cJf "$PACKAGE" -C "$PKG" .
+fi
+printf 'Package created: %s\n' "$PACKAGE"

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SlackResolve
+Comment=Find missing files and resolve Slackware ELF dependencies
+Exec=slackresolve-tui
+Icon=system-software-install
+Terminal=true
+Categories=System;PackageManager;
+StartupNotify=false

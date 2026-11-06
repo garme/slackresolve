@@ -1,0 +1,36 @@
+# Architecture
+
+SlackResolve 0.3.1 has four entry paths and one shared dependency engine.
+
+## Entry paths
+
+1. `check-program` starts from one installed ELF object.
+2. `search-file` finds an exact basename or package path, selects its provider package, and then enters the shared dependency engine.
+3. `check-system` starts from every dynamic ELF object owned by an installed Slackware package.
+4. `install` starts from a local package archive or an exact package selected from official slackpkg indexes.
+
+The engine reads the target's pkgtools records, loader paths, `ld.so.cache`, RPATH, RUNPATH, ELF class, machine, SONAME, required version definitions, and required versioned symbols.
+
+When a requirement is unresolved, or when `search-file` is requested, the official adapter calls `slackpkg file-search`. Results are cross-referenced with the current `pkglist`; candidates are downloaded with `slackpkg download`, verified, unpacked into the analysis cache, and inspected. Generic searches require an exact basename or exact package path after download. Provider packages enter the same graph, so their ELF requirements are resolved recursively. A package with no dynamic ELF objects has no inferable ELF edges and remains a valid package operation.
+
+## Planned filesystem
+
+Selected packages form an overlay over the installed target. SlackResolve rejects unrelated file collisions and global SONAME shadowing.
+
+Package actions are derived from actual paths:
+
+- An exact installed package is `keep`.
+- A package replacing paths owned by an installed package with the same base is `upgrade`.
+- A package with no such overlap is `install`, even when another nonconflicting version of that base is installed.
+
+An upgrade enables a complete installed-system ELF audit against the overlay. This catches old consumers that would lose a compatible provider. It does not prove all runtime behavior, but it prevents the modeled SONAME and versioned-symbol breakages.
+
+## Plans and application
+
+A dependency-first order is saved with pinned archives, hashes, target guards, dependency evidence, and package actions. Ready plans contain no unresolved issues. Apply revalidates the plan and uses `installpkg` or `upgradepkg` according to the recorded action. A journal supports inspection and safe continuation after interruption.
+
+The CLI and `dialog` interface invoke the same backend. The terminal interface only chooses inputs, displays results, and confirms application; it never makes dependency decisions itself.
+
+## Boundaries
+
+The graph covers observable ELF runtime dependencies in the modeled loader context. Script interpreters, language modules, build dependencies, arbitrary `dlopen()` names, package descriptions, and full application semantics are outside the inference model.

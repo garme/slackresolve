@@ -20,13 +20,13 @@ sr_repo_load() {
             rel=${file#"$SR_REPO"/}; sr_priority "$rel"; rank=$REPLY
             (( rank < 90 )) || continue
             sr_package_name "$file" || continue
-            [[ $P_ARCH == x86_64 || $P_ARCH == noarch ]] || continue
+            sr_arch_compatible "$P_ARCH" || continue
             sr_repo_add "$file" "$rank" local "$P_FULL" "$P_ARCH"
         done < <(find "$SR_REPO" -type f \( -name '*.txz' -o -name '*.tgz' -o -name '*.tlz' -o -name '*.tbz' \) -print0 | sort -z)
     elif [[ -f $SR_SLACK_DATA/pkglist ]]; then
         while read -r area name version arch build full location ext; do
             [[ -n $full && -n $ext ]] || continue
-            [[ $arch == x86_64 || $arch == noarch ]] || continue
+            sr_arch_compatible "$arch" || continue
             sr_priority "$area"; rank=$REPLY; (( rank < 90 )) || continue
             sr_repo_add "$full.$ext" "$rank" slackpkg "$full" "$arch"
         done < "$SR_SLACK_DATA/pkglist"

@@ -161,9 +161,24 @@ t_unknown_script() {
     cp "$FIX_DIR/build/app" "$CASE/tree/usr/bin/app"
     printf 'touch /MUST_NOT_RUN\n' > "$CASE/tree/install/doinst.sh"
     tar -cJf "$CASE/unsafe-1.0-x86_64-1.txz" -C "$CASE/tree" .
+    cp "$FIX_REPO/srtest-lib-1.0-x86_64-1.txz" "$CASE/repo/"
     expect 1 "$CLI" install "$CASE/unsafe-1.0-x86_64-1.txz" --output "$CASE/unsafe.plan" --repo "$CASE/repo" "${OPTS[@]}" || return
     contains "$CASE/output" 'installation script contains effects' || return
+    contains "$CASE/output" 'install  srtest-lib-1.0-x86_64-1' || return
     [[ ! -e /MUST_NOT_RUN ]]
+}
+t_modeled_gdk_pixbuf_script() {
+    case_setup gdk-script; mkdir -p "$CASE/tree/usr/share/example" "$CASE/tree/install"
+    printf 'cache fixture\n' > "$CASE/tree/usr/share/example/cache.dat"
+    cat > "$CASE/tree/install/doinst.sh" <<'EOF'
+if [ -x usr/bin/update-gdk-pixbuf-loaders ]; then
+  chroot . /usr/bin/update-gdk-pixbuf-loaders
+fi
+EOF
+    tar -cJf "$CASE/gdk-cache-1.0-noarch-1.txz" -C "$CASE/tree" .
+    expect 0 "$CLI" install "$CASE/gdk-cache-1.0-noarch-1.txz" --output "$CASE/gdk.plan" --repo "$CASE/repo" "${OPTS[@]}" || return
+    contains "$CASE/output" 'Status: ready' || return
+    ! grep -Fq $'ISSUE\tunconfirmed\t/install/doinst.sh' "$CASE/gdk.plan"
 }
 t_slackpkg() {
     case_setup slackpkg; mkdir -p "$CASE/data" "$CASE/downloads"
@@ -186,6 +201,44 @@ EOF
     expect 0 env PATH="$CASE/mock:$PATH" SR_TEST_FIXTURE="$FIX_REPO/srtest-lib-1.0-x86_64-1.txz" SR_TEST_DOWNLOAD="$CASE/downloads" \
         "$CLI" search-file libsrtest.so.1 --repo slackpkg --slackpkg-data "$CASE/data" --slackpkg-cache "$CASE/downloads" --output "$CASE/official.plan" "${OPTS[@]}" || return
     contains "$CASE/output" 'Status: ready'
+}
+t_slackpkg_i586() {
+    case_setup slackpkg-i586; mkdir -p "$CASE/data" "$CASE/downloads" "$CASE/tree/usr/lib"
+    rm -rf "$ROOT/lib64" "$ROOT/usr/lib64"
+    rm -f "$ROOT/var/lib/pkgtools/packages/loader-1.0-x86_64-1"
+    mkdir -p "$ROOT/lib" "$ROOT/usr/lib"
+    printf 'PACKAGE NAME: aaa_base-15.0-i586-4\nFILE LIST:\n' > "$ROOT/var/lib/pkgtools/packages/aaa_base-15.0-i586-4"
+    printf 'synthetic exact-name fixture\n' > "$CASE/tree/usr/lib/librsvg-2.so.2"
+    tar -cJf "$CASE/librsvg-2.52.5-i586-1.txz" -C "$CASE/tree" .
+    printf 'slackware librsvg 2.52.5 i586 1 librsvg-2.52.5-i586-1 ./slackware/l txz\n' > "$CASE/data/pkglist"
+    local digest; digest=$(md5sum "$CASE/librsvg-2.52.5-i586-1.txz")
+    printf '%s  ./slackware/l/librsvg-2.52.5-i586-1.txz\n' "${digest:0:32}" > "$CASE/data/CHECKSUMS.md5"
+    cat > "$CASE/mock/slackpkg" <<'EOF'
+#!/bin/bash
+if [[ $* == *'file-search librsvg-2.so.2'* ]]; then
+    printf '[uninstalled] - librsvg-2.52.5-i586-1\n'
+elif [[ $* == *'-checkgpg=on'* && $* == *'-checkmd5=on'* && $* == *'download librsvg-2.52.5-i586-1'* ]]; then
+    cp "$SR_TEST_FIXTURE" "$SR_TEST_DOWNLOAD/"
+    printf signature > "$SR_TEST_DOWNLOAD/${SR_TEST_FIXTURE##*/}.asc"
+else exit 9
+fi
+EOF
+    printf '#!/bin/bash\nexit 0\n' > "$CASE/mock/gpg"
+    chmod +x "$CASE/mock/slackpkg" "$CASE/mock/gpg"
+    expect 0 env PATH="$CASE/mock:$PATH" SR_TEST_FIXTURE="$CASE/librsvg-2.52.5-i586-1.txz" SR_TEST_DOWNLOAD="$CASE/downloads" \
+        "$CLI" search-file librsvg-2.so.2 --repo slackpkg --slackpkg-data "$CASE/data" --slackpkg-cache "$CASE/downloads" --output "$CASE/i586.plan" "${OPTS[@]}" || return
+    contains "$CASE/output" 'Selected provider: librsvg-2.52.5-i586-1' || return
+    contains "$CASE/output" 'Status: ready' || return
+    grep -Fq $'META\tarchitecture\ti586' "$CASE/i586.plan"
+}
+t_explicit_architecture() {
+    case_setup architecture; mkdir -p "$CASE/tree/usr/share/slackresolve"
+    printf 'architecture fixture\n' > "$CASE/tree/usr/share/slackresolve/architecture.dat"
+    tar -cJf "$CASE/repo/arch-provider-1.0-aarch64-1.txz" -C "$CASE/tree" .
+    tar -cJf "$CASE/repo/arch-provider-1.0-x86_64-1.txz" -C "$CASE/tree" .
+    expect 0 "$CLI" search-file architecture.dat --arch aarch64 --repo "$CASE/repo" --output "$CASE/aarch64.plan" "${OPTS[@]}" || return
+    contains "$CASE/output" 'Selected provider: arch-provider-1.0-aarch64-1' || return
+    grep -Fq $'META\tarchitecture\taarch64' "$CASE/aarch64.plan"
 }
 t_stale() {
     case_setup stale; make_mock_pkgtools
@@ -250,8 +303,11 @@ run_case safe-package-upgrade t_upgrade
 run_case block-upgrade-breaking-old-program t_upgrade_breakage
 run_case parallel-versions-without-collisions t_parallel_versions
 run_case alternative-provider-preference t_ambiguity
-run_case reject-unknown-install-script t_unknown_script
+run_case resolve-dependencies-before-unknown-script t_unknown_script
+run_case model-official-gdk-pixbuf-cache-script t_modeled_gdk_pixbuf_script
 run_case official-slackpkg-download-contract t_slackpkg
+run_case official-slackpkg-i586-file-search t_slackpkg_i586
+run_case explicit-non-x86-architecture t_explicit_architecture
 run_case reject-stale-system-plan t_stale
 run_case dialog-package-workflow t_tui
 run_case command-interface t_help

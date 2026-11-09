@@ -1,4 +1,4 @@
-.TH SLACKRESOLVE 8 "2026-11-06" "SlackResolve 0.3.1"
+.TH SLACKRESOLVE 8 "2026-11-08" "SlackResolve 0.3.3"
 .SH NAME
 slackresolve \- find and install missing Slackware ELF dependencies
 .SH SYNOPSIS
@@ -27,6 +27,9 @@ SlackResolve locates exact filenames or package paths, examines dynamic ELF requ
 .PP
 Planning never installs packages. Applying a ready plan uses installpkg for additions and upgradepkg for replacements. Installed ELF consumers are checked before an upgrade is approved. Parallel package versions are accepted only when their files and library identities do not conflict.
 .SH OPTIONS
+.TP
+.B --arch ARCH
+Override target package architecture detection for an incomplete alternate root.
 .TP
 .BI --repo " DIR|slackpkg"
 Use a local package tree or the official indexes configured for slackpkg.

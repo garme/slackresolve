@@ -38,6 +38,12 @@ function tokens(s,   i,c,q,word,n,active){
     # Harmless exit statements and the common cache update are explicit.
     if(s=="exit 0"){seen_exit=1;next}
     if(s=="/sbin/ldconfig"||s=="ldconfig")next
+    # Official gdk-pixbuf2 packages rebuild their loader cache through this
+    # fixed chroot command.  No arbitrary command, argument, or expansion is
+    # accepted; any additional line still makes the script unconfirmed.
+    if(s=="if [ -x usr/bin/update-gdk-pixbuf-loaders ]; then")next
+    if(s=="chroot . /usr/bin/update-gdk-pixbuf-loaders")next
+    if(s=="fi")next
     unknown=1
 }
-END { for(p in removes)if(!(p in links))unknown=1; print "SCRIPT",(unknown?"unconfirmed":"links-only"),"%00","%00" }
+END { for(p in removes)if(!(p in links))unknown=1; print "SCRIPT",(unknown?"unconfirmed":"modeled"),"%00","%00" }

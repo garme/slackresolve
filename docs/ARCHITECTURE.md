@@ -1,6 +1,6 @@
 # Architecture
 
-SlackResolve 0.3.1 has four entry paths and one shared dependency engine.
+SlackResolve 0.3.3 has four entry paths and one shared dependency engine.
 
 ## Entry paths
 
@@ -11,7 +11,21 @@ SlackResolve 0.3.1 has four entry paths and one shared dependency engine.
 
 The engine reads the target's pkgtools records, loader paths, `ld.so.cache`, RPATH, RUNPATH, ELF class, machine, SONAME, required version definitions, and required versioned symbols.
 
+The target package architecture is inferred from the installed pkgtools
+records. `noarch` packages are always eligible. Members of the 32-bit x86
+package family (`i386` through `i686`) are mutually eligible; other package
+architectures must match the target exactly. An explicit `--arch` override is
+available for incomplete alternate roots. ELF providers are still required to
+match each consumer's class, machine, and endianness.
+
 When a requirement is unresolved, or when `search-file` is requested, the official adapter calls `slackpkg file-search`. Results are cross-referenced with the current `pkglist`; candidates are downloaded with `slackpkg download`, verified, unpacked into the analysis cache, and inspected. Generic searches require an exact basename or exact package path after download. Provider packages enter the same graph, so their ELF requirements are resolved recursively. A package with no dynamic ELF objects has no inferable ELF edges and remains a valid package operation.
+
+Missing ELF requirements are prioritized independently from conservative
+package-script warnings. Therefore, a script that still requires review cannot
+truncate the recursive provider search. Fixed post-install commands explicitly
+modeled by the restricted parser, including the official gdk-pixbuf loader-cache
+update, do not create a pending issue; arbitrary script execution remains
+blocked and is never performed during analysis.
 
 ## Planned filesystem
 

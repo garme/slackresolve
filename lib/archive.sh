@@ -5,7 +5,9 @@ sr_archive() {
     sr_control_path "$input" || { sr_log 'Unsupported characters in archive filename.'; return 1; }
     sr_package_name "$input" || { sr_log "Invalid Slackware package name: ${input##*/}"; return 1; }
     local full=$P_FULL base=$P_BASE arch=$P_ARCH
-    [[ $arch == x86_64 || $arch == noarch ]] || { sr_log "Unsupported package architecture: $arch"; return 1; }
+    sr_arch_compatible "$arch" || {
+        sr_log "Package architecture $arch is incompatible with target $SR_TARGET_ARCH"; return 1;
+    }
     sr_hash "$input" || return; content=$REPLY
     sr_hash_string "$content|$full"; id=$REPLY; A_ID=$id
     [[ ${PK_DIR[$id]+yes} ]] && return 0

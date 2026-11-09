@@ -4,23 +4,32 @@ SlackResolve finds packages containing missing files and resolves ELF library de
 
 The application is written in Bash and awk. It uses Slackware's existing package records, `slackpkg`, `installpkg`, `upgradepkg`, `ldconfig`, and the official repository indexes. Packages do not need embedded dependency metadata.
 
-Version **0.3.1** provides four direct workflows:
+Version **0.3.3** provides four direct workflows:
 
 1. Check an installed program.
 2. Find the package containing an exact filename or package path.
 3. Check the complete system.
 4. Install a package with its recursively discovered dependencies.
 
-The supported target is Slackware x86_64. Slackware 15.0 is the reference release.
+SlackResolve detects the target architecture from the installed Slackware
+package records. It supports `x86_64`, the 32-bit x86 package family (`i386`
+through `i686`), `noarch`, and other Slackware architectures when their package
+architecture matches the target. Slackware 15.0 is the reference release.
 
 ## What it does
 
 - Reads ELF requirements and symbol versions with `readelf`.
+- Detects the target package architecture and rejects foreign-architecture
+  candidates. Use `--arch` only when analyzing an incomplete alternate root.
 - Resolves libraries through the target's loader paths, cache, RPATH and RUNPATH.
 - Uses `slackpkg file-search` to locate official packages containing a missing library.
 - Confirms an exact basename such as `libabc.so.1`, or an exact package path such as `/usr/bin/example`, inside downloaded candidates.
 - Downloads candidates with `slackpkg download`, verifies them, and inspects their actual ELF contents.
 - Repeats the analysis for every selected provider until the dependency chain is complete.
+- Continues closing searchable ELF dependencies even when a separate package
+  installation-script effect still requires review.
+- Models the fixed loader-cache update used by official `gdk-pixbuf2`
+  packages without executing the script during analysis.
 - Creates a reviewable plan containing exact package archives and hashes.
 - Uses `installpkg` for additions and `upgradepkg` for replacements.
 - Audits installed ELF consumers before approving an upgrade.
@@ -50,14 +59,14 @@ slackpkg update
 Install the included native package:
 
 ```sh
-installpkg dist/slackresolve-0.3.1-noarch-1.txz
+installpkg dist/slackresolve-0.3.3-noarch-1.txz
 ```
 
 Or build it from the source tree:
 
 ```sh
 make slackware-package
-installpkg dist/slackresolve-0.3.1-noarch-1.txz
+installpkg dist/slackresolve-0.3.3-noarch-1.txz
 ```
 
 The CLI is installed as `/usr/sbin/slackresolve`. The terminal interface is installed as `/usr/bin/slackresolve-tui` and is also available from the desktop menu.
@@ -214,6 +223,18 @@ Tests use temporary Slackware-like roots and controlled pkgtools/slackpkg stand-
 | `tests/` | Real ELF fixtures and integration tests |
 | `packaging/` | SlackBuild and package description |
 | `docs/` | Architecture, plan format, validation notes, and manual page |
+
+## Publishing on GitHub
+
+Create an empty repository and run from this directory:
+
+```sh
+git init -b main
+git add .
+git commit -m "Initial SlackResolve release"
+git remote add origin https://github.com/YOUR_USERNAME/slackresolve.git
+git push -u origin main
+```
 
 ## License
 

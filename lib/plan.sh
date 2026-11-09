@@ -31,7 +31,7 @@ sr_plan_write() {
         sr_record META version "$SR_VERSION"
         sr_record META root "$SR_ROOT"
         sr_record META release "$SR_RELEASE"
-        sr_record META architecture x86_64
+        sr_record META architecture "$SR_TARGET_ARCH"
         sr_record META status "$status"
         sr_record META database "$signature"
         sr_record META library_path "${SR_LIBRARY_PATH:-}"
@@ -97,7 +97,8 @@ sr_plan_read() {
         esac
     done < "$PLAN_PATH"
     (( header && ${#PLAN_IDS[@]} )) || sr_die 'Empty plan.'
-    [[ ${PLAN_META[root]:-} == /* && ${PLAN_META[architecture]:-} == x86_64 ]] || sr_die 'Invalid target profile.'
+    [[ ${PLAN_META[root]:-} == /* ]] || sr_die 'Invalid target profile.'
+    sr_arch_valid "${PLAN_META[architecture]:-}" || sr_die 'Invalid target architecture.'
     for line in "${PLAN_FILES[@]}"; do
         sr_fields "$line"; path=${F[2]}
         [[ ${PLAN_FULL[${F[1]}]+yes} && $path == /* && $path != / && $path != */../* && ( ${F[3]} == F || ${F[3]} == L || ${F[3]} == D ) ]] || sr_die 'Invalid planned file.'

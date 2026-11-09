@@ -12,10 +12,13 @@ PASS safe-package-upgrade
 PASS block-upgrade-breaking-old-program
 PASS parallel-versions-without-collisions
 PASS alternative-provider-preference
-PASS reject-unknown-install-script
+PASS resolve-dependencies-before-unknown-script
+PASS model-official-gdk-pixbuf-cache-script
 PASS official-slackpkg-download-contract
+PASS official-slackpkg-i586-file-search
+PASS explicit-non-x86-architecture
 PASS reject-stale-system-plan
 PASS dialog-package-workflow
 PASS command-interface
 
-17 passed; 0 failed.
+20 passed; 0 failed.

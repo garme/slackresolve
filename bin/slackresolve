@@ -25,6 +25,7 @@ Options:
   --repo DIR|slackpkg      Official slackpkg indexes or a local package tree.
   --output FILE            Save an actionable plan and its FILE.d archives.
   --root DIR               Target root (default: /).
+  --arch ARCH              Override target package architecture detection.
   --cache DIR              Analysis and download cache.
   --prefer NAME[,NAME]     Preferred provider when alternatives exist.
   --blacklist FILE         Package exclusion expressions.
@@ -44,14 +45,14 @@ EOF
 [[ $# -gt 0 && ${1:-} != --help && ${1:-} != -h ]] || { sr_help; exit; }
 SR_COMMAND=$1; shift
 SR_ROOT=/; SR_ROOT_SET=0; SR_REPO=slackpkg; SR_OUTPUT=; SR_MAX_CANDIDATES=64; SR_MAX_SEARCH=128
-SR_DRY_RUN=0; SR_PREFER=; SR_AUDIT_SYSTEM=0
+SR_DRY_RUN=0; SR_PREFER=; SR_AUDIT_SYSTEM=0; SR_ARCH_OVERRIDE=
 declare -a SR_INPUTS=()
 while (( $# )); do
     case $1 in
-        --root|--repo|--cache|--blacklist|--prefer|--slackpkg-data|--slackpkg-cache|--max-candidates|--max-search|--output)
+        --root|--arch|--repo|--cache|--blacklist|--prefer|--slackpkg-data|--slackpkg-cache|--max-candidates|--max-search|--output)
             (( $# >= 2 )) || sr_die "Missing value: $1"
             case $1 in
-                --root) SR_ROOT=$2; SR_ROOT_SET=1;; --repo) SR_REPO=$2;; --cache) SR_CACHE=$2;;
+                --root) SR_ROOT=$2; SR_ROOT_SET=1;; --arch) SR_ARCH_OVERRIDE=$2;; --repo) SR_REPO=$2;; --cache) SR_CACHE=$2;;
                 --blacklist) SR_BLACKLIST=$2;; --prefer) SR_PREFER=$2;;
                 --slackpkg-data) SR_SLACK_DATA=$2;; --slackpkg-cache) SR_SLACK_CACHE=$2;;
                 --max-candidates) SR_MAX_CANDIDATES=$2;; --max-search) SR_MAX_SEARCH=$2;; --output) SR_OUTPUT=$2;;
@@ -74,12 +75,13 @@ case $SR_COMMAND in
         else SR_ROOT=${PLAN_META[root]}; fi
         if [[ $SR_COMMAND == show ]]; then sr_explain; exit; fi
         sr_init
+        [[ ${PLAN_META[architecture]} == "$SR_TARGET_ARCH" ]] || sr_die "Plan architecture ${PLAN_META[architecture]} differs from target $SR_TARGET_ARCH."
         if [[ $SR_COMMAND == apply ]]; then sr_apply; else sr_check; fi
         exit $?;;
     doctor)
         (( ${#SR_INPUTS[@]} == 0 )) || sr_die 'doctor does not take a package or program.'
         sr_init
-        printf 'SlackResolve %s\nTarget: %s\nRelease: %s\nPackage records: %s\n' "$SR_VERSION" "$SR_ROOT" "$SR_RELEASE" "${SR_PKGDB:-not found}"
+        printf 'SlackResolve %s\nTarget: %s\nRelease: %s\nArchitecture: %s\nPackage records: %s\n' "$SR_VERSION" "$SR_ROOT" "$SR_RELEASE" "$SR_TARGET_ARCH" "${SR_PKGDB:-not found}"
         for sr_tool in bash awk readelf tar sha256sum flock ldconfig slackpkg installpkg upgradepkg dialog; do
             if command -v "$sr_tool" >/dev/null; then printf 'AVAILABLE: %s\n' "$sr_tool"; else printf 'UNAVAILABLE: %s\n' "$sr_tool"; fi
         done

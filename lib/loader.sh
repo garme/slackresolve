@@ -41,8 +41,8 @@ sr_expand_paths() {
         if [[ $raw == *:* ]]; then part=${raw%%:*}; raw=${raw#*:}; else part=$raw; raw=; fi
         [[ -n $part ]] || return 1
         part=${part//\$\{ORIGIN\}/$origin}; part=${part//\$ORIGIN/$origin}
-        part=${part//\$\{LIB\}/lib64}; part=${part//\$LIB/lib64}
-        part=${part//\$\{PLATFORM\}/x86_64}; part=${part//\$PLATFORM/x86_64}
+        part=${part//\$\{LIB\}/$SR_LIB_TOKEN}; part=${part//\$LIB/$SR_LIB_TOKEN}
+        part=${part//\$\{PLATFORM\}/$SR_PLATFORM}; part=${part//\$PLATFORM/$SR_PLATFORM}
         [[ $part == /* && $part != *'$'* ]] || return 1
         sr_norm "$part"; result+="$REPLY"$'\n'
     done
@@ -74,7 +74,9 @@ sr_dependency() {
         while IFS=$'\t' read -r raw candidate; do
             [[ $raw == "$needed" ]] || continue
             if [[ $candidate == */glibc-hwcaps/* ]]; then DEP_STATUS=unconfirmed; DEP_REASON='Hardware-capability selection is not modeled.'; return 1; fi
-            if [[ ${M_FLAGS[$consumer]:-} == *NODEFLIB* && ( $candidate == /lib64/* || $candidate == /usr/lib64/* ) ]]; then continue; fi
+            if [[ ${M_FLAGS[$consumer]:-} == *NODEFLIB* &&
+                  ( $candidate == /lib/* || $candidate == /usr/lib/* ||
+                    $candidate == /lib64/* || $candidate == /usr/lib64/* ) ]]; then continue; fi
             paths+=("$candidate")
         done < "$SR_WORK/ldcache"
         # Planned additions to configured cache paths require ldconfig at apply.
@@ -82,7 +84,9 @@ sr_dependency() {
             candidate=$dir/$needed
             [[ ${OV_TYPE[$candidate]+yes} ]] && paths+=("$candidate")
         done
-        if [[ ${M_FLAGS[$consumer]:-} != *NODEFLIB* ]]; then paths+=("/lib64/$needed" "/usr/lib64/$needed"); fi
+        if [[ ${M_FLAGS[$consumer]:-} != *NODEFLIB* ]]; then
+            for dir in "${LD_PATHS[@]}"; do paths+=("$dir/$needed"); done
+        fi
     fi
     for candidate in "${paths[@]}"; do
         sr_lookup "$candidate" || continue

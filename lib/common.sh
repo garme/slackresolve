@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Shared primitives. All persistent records are data, never sourced as shell.
-SR_VERSION=0.3.1
-SR_SCHEMA=2
+SR_VERSION=0.3.3
+SR_SCHEMA=3
 SR_ANALYZER=4
 export LC_ALL=C
 umask 077
@@ -48,6 +48,40 @@ sr_package_name() {
     P_FULL=$name; P_BASE=${BASH_REMATCH[1]}; P_VER=${BASH_REMATCH[2]}
     P_ARCH=${BASH_REMATCH[3]}; P_BUILD=${BASH_REMATCH[4]}
 }
+sr_arch_valid() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; }
+sr_arch_compatible() {
+    local package_arch=$1 target=${SR_TARGET_ARCH:-}
+    [[ $package_arch == noarch ]] && return 0
+    [[ -n $target ]] || return 1
+    case $target in
+        i?86) [[ $package_arch =~ ^i[3-6]86$ ]];;
+        *) [[ $package_arch == "$target" ]];;
+    esac
+}
+sr_target_profile() {
+    local detected= arch count best=0 machine
+    if [[ -n ${SR_ARCH_OVERRIDE:-} ]]; then
+        sr_arch_valid "$SR_ARCH_OVERRIDE" || sr_die "Invalid target architecture: $SR_ARCH_OVERRIDE"
+        detected=$SR_ARCH_OVERRIDE
+    else
+        for arch in "${!SR_ARCH_COUNTS[@]}"; do
+            count=${SR_ARCH_COUNTS[$arch]}
+            if (( count > best )); then detected=$arch; best=$count; fi
+        done
+        if [[ -z $detected ]]; then
+            machine=$(uname -m 2>/dev/null || printf unknown)
+            detected=$machine
+        fi
+    fi
+    sr_arch_valid "$detected" || sr_die 'Could not determine a safe target architecture.'
+    SR_TARGET_ARCH=$detected
+    if [[ -d ${SR_ROOT%/}/lib64 || -d ${SR_ROOT%/}/usr/lib64 ]]; then
+        SR_LIB_TOKEN=lib64
+    else
+        SR_LIB_TOKEN=lib
+    fi
+    SR_PLATFORM=$SR_TARGET_ARCH
+}
 sr_init() {
     [[ ${BASH_VERSINFO[0]} -ge 4 ]] || sr_die 'Bash 4 or later is required.'
     local c
@@ -75,11 +109,12 @@ sr_init() {
     if [[ -f $SR_BLACKLIST ]]; then
         awk 'sub(/#.*/, "") { } {gsub(/^[ \t]+|[ \t]+$/, ""); if(length) print}' "$SR_BLACKLIST" > "$SR_WORK/blacklist"
     fi
-    declare -gA INST_BASE=() INST_BASE_LIST=() INST_FULL=() OWN=()
+    declare -gA INST_BASE=() INST_BASE_LIST=() INST_FULL=() OWN=() SR_ARCH_COUNTS=()
     local log rel inlist owner
     if [[ -n $SR_PKGDB ]]; then
         while IFS= read -r -d '' log; do
             owner=${log##*/}; sr_package_name "$owner" || continue
+            if [[ $P_ARCH != noarch ]]; then ((SR_ARCH_COUNTS["$P_ARCH"]+=1)); fi
             INST_BASE["$P_BASE"]=$owner
             INST_BASE_LIST["$P_BASE"]+="$owner"$'\n'
             INST_FULL["$owner"]=$log
@@ -92,6 +127,7 @@ sr_init() {
             done < "$log"
         done < <(find -L "$SR_PKGDB" -maxdepth 1 -type f -print0 | sort -z)
     fi
+    sr_target_profile
     declare -gA M_LOADED=() M_CLASS=() M_MACHINE=() M_ENDIAN=() M_TYPE=()
     declare -gA M_NEEDED=() M_SONAME=() M_RPATH=() M_RUNPATH=() M_INTERP=()
     declare -gA M_VNEED=() M_SREQ=() M_SDEF=() M_VDEF=() M_FLAGS=() ELF_ID=()
@@ -123,7 +159,11 @@ sr_guard() {
 }
 sr_loader_paths() {
     local dir file line
-    LD_PATHS=(/lib64 /usr/lib64)
+    if [[ $SR_LIB_TOKEN == lib64 ]]; then
+        LD_PATHS=(/lib64 /usr/lib64 /lib /usr/lib)
+    else
+        LD_PATHS=(/lib /usr/lib)
+    fi
     : > "$SR_WORK/ldcache"
     if command -v ldconfig >/dev/null && [[ -f ${SR_ROOT%/}/etc/ld.so.cache ]]; then
         ldconfig -p -C "${SR_ROOT%/}/etc/ld.so.cache" 2>/dev/null |

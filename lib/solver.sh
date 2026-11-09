@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-only
 sr_issue() {
     sr_record ISSUE "$1" "$2" "$3" "$4" >> "$SR_WORK/issues"
-    if [[ -z ${FIRST_CODE:-} ]]; then FIRST_CODE=$1; FIRST_PATH=$2; FIRST_NEED=$3; FIRST_REASON=$4; fi
+    # A conservative overlay issue must not prevent the solver from closing
+    # ordinary ELF dependencies.  Keep the first issue for reporting, but let
+    # the first missing dependency take precedence as the next search target.
+    if [[ -z ${FIRST_CODE:-} || ( $FIRST_CODE != missing && $1 == missing ) ]]; then
+        FIRST_CODE=$1; FIRST_PATH=$2; FIRST_NEED=$3; FIRST_REASON=$4
+    fi
 }
 sr_collect_system_roots() {
     AUDIT_ROOTS=()
@@ -158,9 +163,6 @@ sr_graph() {
             source=$V_FILE
             sr_elf "$source" || { sr_issue incompatible "$path" '' 'Object is not a readable ELF file.'; continue; }
             eid=$E_ID
-            if [[ ${M_CLASS[$eid]} != ELF64 || ${M_MACHINE[$eid]} != 'Advanced Micro Devices X86-64' ]]; then
-                sr_issue incompatible "$path" '' 'Only x86_64 ELF64 objects are supported in this release.'; continue
-            fi
             if [[ ${M_FLAGS[$eid]:-} == *UNMODELED* ]]; then sr_issue unconfirmed "$path" '' 'Unsupported dynamic-loader tag.'; fi
             nextinherit=$inherit
             if [[ -z ${M_RUNPATH[$eid]:-} && -n ${M_RPATH[$eid]:-} ]]; then

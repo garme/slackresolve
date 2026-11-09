@@ -1,4 +1,4 @@
-# Plan format, schema 2
+# Plan format, schema 3
 
 Plans are UTF-8 tab-separated data. They are parsed as records and are never sourced or evaluated as shell code.
 
@@ -17,5 +17,8 @@ Empty fields use `%00`. Percent, tab, newline, and carriage return use `%25`, `%
 | `GUARD` | existing path, original type, original value |
 
 Package actions are `install`, `upgrade`, and `keep`. An upgrade must name the installed package it replaces.
+
+Schema 3 records the detected target package architecture. Apply and verify
+reject a plan when its architecture differs from the current target.
 
 The adjacent `PLAN.d/` directory holds the exact package archives. A ready plan has no issue records and has one complete operation order. Unknown records, unsupported schemas, missing archives, changed hashes, and paths escaping the plan directory are rejected.

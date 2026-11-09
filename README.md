@@ -224,18 +224,6 @@ Tests use temporary Slackware-like roots and controlled pkgtools/slackpkg stand-
 | `packaging/` | SlackBuild and package description |
 | `docs/` | Architecture, plan format, validation notes, and manual page |
 
-## Publishing on GitHub
-
-Create an empty repository and run from this directory:
-
-```sh
-git init -b main
-git add .
-git commit -m "Initial SlackResolve release"
-git remote add origin https://github.com/YOUR_USERNAME/slackresolve.git
-git push -u origin main
-```
-
 ## License
 
 GNU General Public License version 3 (`GPL-3.0-only`). See [LICENSE](LICENSE).

@@ -1,6 +1,6 @@
 # Architecture
 
-SlackResolve 0.4.0 has four entry paths and one shared dependency engine.
+SlackResolve 0.5.0 has four entry paths and one shared dependency engine.
 
 ## Entry paths
 
@@ -18,12 +18,19 @@ architectures must match the target exactly. An explicit `--arch` override is
 available for incomplete alternate roots. ELF providers are still required to
 match each consumer's class, machine, and endianness.
 
-For official repositories, SlackResolve builds a persistent basename-to-package
-index from Slackware's `MANIFEST` and cross-references it with the current
-`pkglist`. Its cache key includes the release, architecture, and repository
-metadata state. A generic file that is not represented in the fast library
-map falls back to `slackpkg file-search`; that result is also cached under the
+For official repositories, SlackResolve builds a persistent basename/path-to-
+package index from slackpkg's local `filelist`, cross-referenced with `pkglist`.
+Slackware `MANIFEST` data is a compatibility fallback. Its cache key includes
+the release, architecture, and repository metadata state, so conversion occurs
+only after `slackpkg update` changes those inputs. A query absent from this
+index may fall back to `slackpkg file-search`; that result is cached under the
 same repository signature.
+
+Installed pkgtools records are converted into persistent package and ownership
+tables keyed by filenames, sizes, and modification times. Package archives and
+ELF results remain content-addressed. Cold ELF parsing is protected by per-
+object locks and can run in bounded parallel batches; warm runs load the cached
+records directly.
 
 Candidates are downloaded with `slackpkg download`, verified, unpacked into
 the content-addressed analysis cache, and inspected. Generic searches require
@@ -35,7 +42,9 @@ valid package operation.
 Each graph pass collects all unresolved requirements. Providers that are
 unambiguous are deduplicated and added as one dependency round, avoiding a
 complete graph restart for every individual library. Ambiguous alternatives
-continue through the bounded backtracking search.
+continue through the bounded backtracking search. Completed graph states are
+memoized by their selected-package frontier, so a state revisited by
+backtracking or final plan validation is restored instead of traversed again.
 
 Missing ELF requirements are prioritized independently from conservative
 package-script warnings. Therefore, a script that still requires review cannot
@@ -58,7 +67,13 @@ An upgrade enables a complete installed-system ELF audit against the overlay. Th
 
 ## Plans and application
 
-A dependency-first order is saved with pinned archives, hashes, target guards, dependency evidence, and package actions. Ready plans contain no unresolved issues. Apply revalidates the plan and uses `installpkg` or `upgradepkg` according to the recorded action. A journal supports inspection and safe continuation after interruption.
+A dependency-first order is saved with pinned archives, hashes, target guards,
+dependency evidence, and package actions. Strongly connected dependency cycles
+are recorded as explicit groups and ordered deterministically. Ready plans
+contain no unresolved issues. Apply revalidates the plan and uses `installpkg`
+or `upgradepkg` according to the recorded action. Runtime caches are refreshed
+after the whole transaction, and a journal supports inspection and safe
+continuation after interruption.
 
 The CLI and `dialog` interface invoke the same backend. The terminal interface only chooses inputs, displays results, and confirms application; it never makes dependency decisions itself.
 

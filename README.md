@@ -4,7 +4,8 @@ SlackResolve finds packages containing missing files and resolves ELF library de
 
 The application is written in Bash and awk. It uses Slackware's existing package records, `slackpkg`, `installpkg`, `upgradepkg`, `ldconfig`, and the official repository indexes. Packages do not need embedded dependency metadata.
 
-Version **0.4.0** provides four direct workflows:
+Version **0.5.0** provides four direct workflows and replaces repeated
+`slackpkg file-search` calls with persistent local indexes:
 
 1. Check an installed program.
 2. Find the package containing an exact filename or package path.
@@ -22,14 +23,27 @@ architecture matches the target. Slackware 15.0 is the reference release.
 - Detects the target package architecture and rejects foreign-architecture
   candidates. Use `--arch` only when analyzing an incomplete alternate root.
 - Resolves libraries through the target's loader paths, cache, RPATH and RUNPATH.
-- Builds a persistent provider index from Slackware's official `MANIFEST`
-  files, avoiding a separate `slackpkg file-search` process for every library.
+- Builds a persistent basename/path-to-package index from slackpkg's local
+  `filelist`, with `MANIFEST` data as a compatibility fallback. The index is
+  rebuilt only after the official repository metadata changes.
+- Builds a persistent index of installed pkgtools records and file ownership,
+  invalidated only when those records change.
 - Caches fallback `slackpkg file-search` results by repository state.
 - Confirms an exact basename such as `libabc.so.1`, or an exact package path such as `/usr/bin/example`, inside downloaded candidates.
 - Downloads candidates with `slackpkg download`, verifies them, and inspects their actual ELF contents.
 - Resolves unique providers in dependency rounds, deduplicating packages before
   the next recursive analysis.
 - Reuses downloaded archives, extracted packages, and ELF metadata.
+- Runs cold ELF analyses in controlled parallel batches (`--jobs`, default 4).
+- Memoizes provider queries, candidate compatibility, and completed graph
+  states during one resolution; final validation and repeated backtracking
+  states do not rebuild the whole graph.
+- Collapses genuine dependency cycles into explicit installation groups while
+  retaining deterministic dependency-first order between groups.
+- Writes compact plans containing pinned package archives and only the ELF or
+  link payload records needed for post-installation validation.
+- Reports per-stage timings, cache behavior, repository fallbacks, downloads,
+  analyses, graph passes, and elapsed time with `--profile`.
 - Saves automatic checkpoints and can continue an interrupted resolution.
 - Continues closing searchable ELF dependencies even when a separate package
   installation-script effect still requires review.
@@ -64,14 +78,14 @@ slackpkg update
 Install the included native package:
 
 ```sh
-installpkg dist/slackresolve-0.4.0-noarch-1.txz
+installpkg dist/slackresolve-0.5.0-noarch-1.txz
 ```
 
 Or build it from the source tree:
 
 ```sh
 make slackware-package
-installpkg dist/slackresolve-0.4.0-noarch-1.txz
+installpkg dist/slackresolve-0.5.0-noarch-1.txz
 ```
 
 The CLI is installed as `/usr/sbin/slackresolve`. The terminal interface is installed as `/usr/bin/slackresolve-tui` and is also available from the desktop menu.
@@ -150,10 +164,22 @@ slackresolve index
 slackresolve index --rebuild
 ```
 
-The index is derived from the official Slackware `MANIFEST` files already
-maintained by `slackpkg`. It is keyed by the release, architecture, and current
-repository-index state. Normal resolution builds it automatically; the command
-above is useful for preparing or explicitly refreshing the cache.
+The index is derived primarily from the official `filelist` already maintained
+by `slackpkg`; `MANIFEST` files are accepted as a fallback. It is keyed by the
+release, architecture, and current repository-index state. Normal resolution
+builds it automatically; the command above is useful for preparing or
+explicitly refreshing the cache.
+
+To measure a cold or warm resolution and control concurrent ELF analysis:
+
+```sh
+slackresolve search-file librsvg-2.so.2 \
+  --jobs 4 --profile --output librsvg.plan
+```
+
+The second run with the same slackpkg and pkgtools state should report cached
+repository, installed-system, package, and ELF data. `--jobs 1` disables
+parallel ELF analysis for very small or memory-constrained systems.
 
 ### Continue an interrupted resolution
 

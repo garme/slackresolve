@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 sr_archive() {
-    local input=$1 origin=${2:-local} id dir tmp line type path target mode physical found=0 content
+    local input=$1 origin=${2:-local} id dir tmp line type path target mode physical found=0 content offset pid
+    local -a analysis_files=() analysis_pids=()
     [[ -f $input ]] || { sr_log "Package not found: $input"; return 1; }
     sr_control_path "$input" || { sr_log 'Unsupported characters in archive filename.'; return 1; }
     sr_package_name "$input" || { sr_log "Invalid Slackware package name: ${input##*/}"; return 1; }
@@ -13,6 +14,7 @@ sr_archive() {
     [[ ${PK_DIR[$id]+yes} ]] && return 0
     dir=$SR_CACHE/objects/$id
     if [[ ! -f $dir/complete ]]; then
+        ((SR_PROFILE_PACKAGE_ANALYSES+=1))
         tmp=$(mktemp -d "$SR_WORK/archive.XXXXXXXX") || return 1
         mkdir -p -- "$tmp/root"; : > "$tmp/regular"
         tar -tvf "$input" --numeric-owner --full-time --quoting-style=escape > "$tmp/list" 2> "$tmp/tar.err" || return 1
@@ -47,6 +49,20 @@ sr_archive() {
         fi
         cat "$tmp/script" >> "$tmp/files"
         : > "$tmp/elfs"
+        if (( SR_JOBS > 1 )); then
+            while IFS= read -r line; do
+                sr_fields "$line"; type=${F[0]}; path=${F[1]}
+                [[ $type == F && $path != /install/* ]] || continue
+                analysis_files+=("$tmp/root$path")
+            done < "$tmp/files"
+            for ((offset=0;offset<${#analysis_files[@]};offset+=SR_JOBS)); do
+                analysis_pids=()
+                for physical in "${analysis_files[@]:offset:SR_JOBS}"; do
+                    ( sr_elf "$physical" >/dev/null 2>&1 || : ) & analysis_pids+=("$!")
+                done
+                for pid in "${analysis_pids[@]}"; do wait "$pid" || :; done
+            done
+        fi
         while IFS= read -r line; do
             sr_fields "$line"; type=${F[0]}; path=${F[1]}
             [[ $type == F && $path != /install/* ]] || continue
@@ -59,7 +75,7 @@ sr_archive() {
         printf '%s\n' "$full" > "$tmp/name"; : > "$tmp/complete"
         if [[ -e $dir ]]; then rm -rf -- "$dir"; fi
         mv -- "$tmp" "$dir" || return 1
-    fi
+    else ((SR_PROFILE_OBJECT_HITS+=1)); fi
     PK_DIR["$id"]=$dir; PK_FULL["$id"]=$full; PK_BASE["$id"]=$base; PK_ARCH["$id"]=$arch
     PK_ARCHIVE["$id"]=$dir/$full.${input##*.}; PK_HASH["$id"]=$content; PK_ORIGIN["$id"]=$origin
     PK_ELFS["$id"]=$dir/elfs; PK_SCRIPT["$id"]=absent

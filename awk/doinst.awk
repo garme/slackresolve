@@ -35,14 +35,18 @@ function tokens(s,   i,c,q,word,n,active){
         print "L",enc("/" t[3] "/" t[8]),enc(t[7]),enc("doinst")
         next
     }
-    # Harmless exit statements and the common cache update are explicit.
+    # Harmless exit statements and fixed cache updates are explicit.  These
+    # commands are regenerated after an installation group is complete.
     if(s=="exit 0"){seen_exit=1;next}
     if(s=="/sbin/ldconfig"||s=="ldconfig")next
-    # Official gdk-pixbuf2 packages rebuild their loader cache through this
-    # fixed chroot command.  No arbitrary command, argument, or expansion is
-    # accepted; any additional line still makes the script unconfirmed.
+    if(s=="if [ -x sbin/ldconfig ]; then"||s=="if [ -x /sbin/ldconfig ]; then")next
+    if(s=="chroot . /sbin/ldconfig")next
+    if(s=="if [ -x usr/bin/fc-cache ]; then")next
+    if(s=="chroot . /usr/bin/fc-cache -f"||s=="chroot . /usr/bin/fc-cache -r")next
     if(s=="if [ -x usr/bin/update-gdk-pixbuf-loaders ]; then")next
     if(s=="chroot . /usr/bin/update-gdk-pixbuf-loaders")next
+    if(s=="if [ -x usr/bin/gdk-pixbuf-query-loaders ]; then")next
+    if(s=="chroot . /usr/bin/gdk-pixbuf-query-loaders --update-cache")next
     if(s=="fi")next
     unknown=1
 }

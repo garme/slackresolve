@@ -16,11 +16,12 @@ PASS resolve-dependencies-before-unknown-script
 PASS model-official-gdk-pixbuf-cache-script
 PASS official-slackpkg-download-contract
 PASS official-slackpkg-i586-file-search
-PASS persistent-manifest-provider-index
+PASS persistent-slackpkg-filelist-index
 PASS resume-interrupted-resolution
+PASS cyclic-installation-group
 PASS explicit-non-x86-architecture
 PASS reject-stale-system-plan
 PASS dialog-package-workflow
 PASS command-interface
 
-22 passed; 0 failed.
+23 passed; 0 failed.

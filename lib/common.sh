@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Shared primitives. All persistent records are data, never sourced as shell.
-SR_VERSION=0.4.0
-SR_SCHEMA=3
-SR_ANALYZER=4
+SR_VERSION=0.5.0
+SR_SCHEMA=4
+SR_ANALYZER=5
 export LC_ALL=C
 umask 077
 
@@ -14,6 +14,31 @@ sr_progress() {
     fi
 }
 sr_log() { printf '%s\n' "$*" >&2; sr_progress "${SR_PERCENT:-0}" "$*"; }
+sr_clock() { REPLY=$(date +%s%N); }
+sr_seconds_since() { local now; now=$(date +%s%N); awk -v a="$1" -v b="$now" 'BEGIN{printf "%.3f",(b-a)/1000000000}'; }
+sr_profile_report() {
+    [[ ${SR_PROFILE:-0} == 1 ]] || return 0
+    printf '\nPerformance profile\n'
+    printf '  Total time:                 %s s\n' "$(sr_seconds_since "$SR_PROFILE_STARTED")"
+    printf '  Initialization:             %s s\n' "${SR_PROFILE_INIT_SECONDS:-0.000}"
+    printf '  Repository/index loading:   %s s\n' "${SR_PROFILE_REPO_SECONDS:-0.000}"
+    printf '  Initial input analysis:     %s s\n' "${SR_PROFILE_INPUT_SECONDS:-0.000}"
+    printf '  Dependency solving:         %s s\n' "${SR_PROFILE_SOLVER_SECONDS:-0.000}"
+    printf '  Plan serialization:         %s s\n' "${SR_PROFILE_PLAN_SECONDS:-0.000}"
+    printf '  Repository index:           %s\n' "$([[ ${SR_REPOSITORY_INDEX_HIT:-0} == 1 ]] && printf cached || printf rebuilt)"
+    printf '  Installed-system index:     %s\n' "$([[ ${SR_SYSTEM_INDEX_HIT:-0} == 1 ]] && printf cached || printf rebuilt)"
+    printf '  Direct provider lookups:    %s\n' "${SR_PROFILE_LOOKUPS:-0}"
+    printf '  slackpkg file-search calls: %s\n' "${SR_PROFILE_FALLBACKS:-0}"
+    printf '  Package cache hits:         %s\n' "${SR_PROFILE_PACKAGE_HITS:-0}"
+    printf '  Package downloads:          %s\n' "${SR_PROFILE_DOWNLOADS:-0}"
+    printf '  Package analyses:           %s\n' "${SR_PROFILE_PACKAGE_ANALYSES:-0}"
+    printf '  Package-analysis hits:      %s\n' "${SR_PROFILE_OBJECT_HITS:-0}"
+    printf '  ELF analyses:               %s\n' "${SR_PROFILE_ELF_ANALYSES:-0}"
+    printf '  ELF cache hits:             %s\n' "${SR_PROFILE_ELF_HITS:-0}"
+    printf '  Graph passes:               %s\n' "${SR_PROFILE_GRAPH_PASSES:-0}"
+    printf '  Reused graph states:        %s\n' "${SR_PROFILE_GRAPH_HITS:-0}"
+    printf '  ELF analysis jobs:          %s\n' "${SR_JOBS:-1}"
+}
 sr_encode() {
     REPLY=$1
     REPLY=${REPLY//%/%25}; REPLY=${REPLY//$'\t'/%09}
@@ -85,7 +110,7 @@ sr_target_profile() {
 sr_init() {
     [[ ${BASH_VERSINFO[0]} -ge 4 ]] || sr_die 'Bash 4 or later is required.'
     local c
-    for c in awk tar readelf sha256sum find sort realpath readlink stat mktemp cp mv grep cmp; do
+    for c in awk tar readelf sha256sum find sort realpath readlink stat mktemp cp mv grep cmp flock; do
         command -v "$c" >/dev/null || sr_die "Required command not found: $c"
     done
     SR_ROOT=${SR_ROOT:-/}; sr_norm "$SR_ROOT"; SR_ROOT=${REPLY%/}; [[ -n $SR_ROOT ]] || SR_ROOT=/
@@ -96,7 +121,7 @@ sr_init() {
     SR_WORK=$(mktemp -d "$SR_CACHE/work.XXXXXXXX") || sr_die 'Could not create the work directory.'
     trap '[[ -z ${SR_WORK:-} ]] || rm -rf -- "$SR_WORK"' EXIT
     mkdir -p -- "$SR_CACHE/archives" "$SR_CACHE/objects" "$SR_CACHE/elf/$SR_ANALYZER" \
-        "$SR_CACHE/indexes" "$SR_CACHE/searches" "$SR_CACHE/sessions"
+        "$SR_CACHE/indexes" "$SR_CACHE/searches" "$SR_CACHE/sessions" "$SR_CACHE/system-index"
     SR_PKGDB=
     for c in /var/lib/pkgtools/packages /var/log/packages /var/adm/packages; do
         if [[ -d ${SR_ROOT%/}$c ]]; then SR_PKGDB=${SR_ROOT%/}$c; break; fi
@@ -110,24 +135,7 @@ sr_init() {
     if [[ -f $SR_BLACKLIST ]]; then
         awk 'sub(/#.*/, "") { } {gsub(/^[ \t]+|[ \t]+$/, ""); if(length) print}' "$SR_BLACKLIST" > "$SR_WORK/blacklist"
     fi
-    declare -gA INST_BASE=() INST_BASE_LIST=() INST_FULL=() OWN=() SR_ARCH_COUNTS=()
-    local log rel inlist owner
-    if [[ -n $SR_PKGDB ]]; then
-        while IFS= read -r -d '' log; do
-            owner=${log##*/}; sr_package_name "$owner" || continue
-            if [[ $P_ARCH != noarch ]]; then ((SR_ARCH_COUNTS["$P_ARCH"]+=1)); fi
-            INST_BASE["$P_BASE"]=$owner
-            INST_BASE_LIST["$P_BASE"]+="$owner"$'\n'
-            INST_FULL["$owner"]=$log
-            inlist=0
-            while IFS= read -r rel; do
-                if [[ $rel == 'FILE LIST:' ]]; then inlist=1; continue; fi
-                (( inlist )) || continue
-                rel=${rel#./}; [[ -n $rel && $rel != install/* ]] || continue
-                OWN["/${rel%/}"]=$owner
-            done < "$log"
-        done < <(find -L "$SR_PKGDB" -maxdepth 1 -type f -print0 | sort -z)
-    fi
+    sr_system_index_load || sr_die 'Could not build the installed-system index.'
     sr_target_profile
     declare -gA M_LOADED=() M_CLASS=() M_MACHINE=() M_ENDIAN=() M_TYPE=()
     declare -gA M_NEEDED=() M_SONAME=() M_RPATH=() M_RUNPATH=() M_INTERP=()
@@ -139,9 +147,14 @@ sr_init() {
     declare -ga SELECTED=() ROOT_PACKAGES=() REPO_IDS=() LD_PATHS=() AUDIT_ROOTS=()
     declare -gA RP_PATH=() RP_RANK=() RP_ORIGIN=() RP_FULL=() RP_BASE=()
     declare -gA RP_MANIFEST=() RP_ARCH=() RP_BY_FULL=() RP_FETCHED_ID=()
+    declare -gA RP_CACHE_FILE=() RP_MD5_FILE=()
     declare -gA PROVIDER_RIDS=() SEARCH_RESULT=() SELECTED_SET=()
+    declare -gA CANDIDATE_RESULT=()
     declare -gA GRAPH_CONSUMER_EID=()
     SR_SEARCH_COUNT=0; SR_LIMIT_HIT=0; SR_BEST_DEPTH=-1; SR_BEST_SELECTED=
+    SR_PROFILE_LOOKUPS=0; SR_PROFILE_FALLBACKS=0; SR_PROFILE_DOWNLOADS=0; SR_PROFILE_PACKAGE_HITS=0
+    SR_PROFILE_PACKAGE_ANALYSES=0; SR_PROFILE_OBJECT_HITS=0; SR_PROFILE_ELF_ANALYSES=0; SR_PROFILE_ELF_HITS=0; SR_PROFILE_GRAPH_PASSES=0; SR_PROFILE_GRAPH_HITS=0
+    mkdir -p -- "$SR_WORK/graph-cache"
     : > "$SR_WORK/rejections"; : > "$SR_WORK/solutions"
     sr_loader_paths
 }

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 sr_elf() {
-    local physical=$1 id dest tmp line key magic
+    local physical=$1 id dest tmp line key magic elf_lock
     [[ -f $physical ]] || return 1
     if [[ ${ELF_ID[$physical]+yes} ]]; then
         id=${ELF_ID[$physical]}; E_ID=$id
@@ -14,14 +14,20 @@ sr_elf() {
     if [[ ${M_LOADED[$id]+yes} ]]; then [[ ${M_TYPE[$id]:-} == EXEC || ${M_TYPE[$id]:-} == DYN ]]; return; fi
     dest=$SR_CACHE/elf/$SR_ANALYZER/$id.tsv
     if [[ ! -s $dest ]]; then
-        tmp=$(mktemp "$SR_WORK/elf.XXXXXXXX") || return 1
-        if ! readelf -W -h -l -d --version-info --dyn-syms -- "$physical" > "$tmp.raw" 2> "$tmp.err"; then
-            sr_log "Could not read ELF object: $physical"; return 1
-        fi
-        awk -f "$SR_LIBDIR/../awk/elf.awk" "$tmp.raw" > "$tmp" || return 1
-        [[ -s $tmp ]] || return 1
-        mv -- "$tmp" "$dest" || return 1
-    fi
+        exec {elf_lock}> "$dest.lock" || return 1
+        flock "$elf_lock" || return 1
+        if [[ ! -s $dest ]]; then
+            ((SR_PROFILE_ELF_ANALYSES+=1))
+            tmp=$(mktemp "$SR_WORK/elf.XXXXXXXX") || return 1
+            if ! readelf -W -h -l -d --version-info --dyn-syms -- "$physical" > "$tmp.raw" 2> "$tmp.err"; then
+                sr_log "Could not read ELF object: $physical"; return 1
+            fi
+            awk -f "$SR_LIBDIR/../awk/elf.awk" "$tmp.raw" > "$tmp" || return 1
+            [[ -s $tmp ]] || return 1
+            mv -- "$tmp" "$dest" || return 1
+        else ((SR_PROFILE_ELF_HITS+=1)); fi
+        exec {elf_lock}>&-
+    else ((SR_PROFILE_ELF_HITS+=1)); fi
     while IFS= read -r line; do
         sr_fields "$line"
         case ${F[0]} in

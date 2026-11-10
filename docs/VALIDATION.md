@@ -12,7 +12,7 @@ Current coverage includes:
 - a complete package-owned system audit;
 - recursive dependency discovery;
 - official generic `slackpkg file-search`, download, checksum, and signature contracts;
-- persistent official `MANIFEST` provider indexing without a per-library
+- persistent official slackpkg `filelist` provider indexing without a per-library
   `slackpkg file-search` invocation;
 - the exact 32-bit search result `[uninstalled] - librsvg-2.52.5-i586-1`;
 - dependency-first dry-run and application;
@@ -27,6 +27,9 @@ Current coverage includes:
 - stale package-database rejection;
 - interruption checkpointing and successful continuation of the same
   recursive resolution;
+- deterministic handling of a cyclic package dependency as one strongly
+  connected installation group;
+- explicit non-x86 architecture matching;
 - the `dialog` package-planning workflow.
 
 The pkgtools and slackpkg tests use controlled stand-ins around the real resolver. They prove command contracts and state handling, but they do not replace acceptance testing with the exact Slackware release and mirror configuration where the software will run.

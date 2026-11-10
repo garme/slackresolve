@@ -10,10 +10,15 @@ function fail(s){print "archive: " s > "/dev/stderr";bad=1}
     if(type=="l") {pos=index(line," -> ");if(!pos){fail("invalid symlink");next}target=substr(line,pos+4);line=substr(line,1,pos-1)}
     if(type=="h") {pos=index(line," link to ");if(!pos){fail("invalid hardlink");next}target="/" substr(line,pos+9);line=substr(line,1,pos-1)}
     if(line ~ /\\/ || target ~ /\\/){fail("escaped archive path is not supported: " line);next}
-    if(line ~ /^\// || line ~ /(^|\/)\.\.(\/|$)/){fail("archive path escapes its root: " line);next}
+    sub(/^\.\//,"",line)
+    if(!length(line)||line==".")next
+    if(line ~ /^\// || line ~ /(^|\/)\.\.(\/|$)/ || line ~ /(^|\/)\.(\/|$)/ || line ~ /\/\//){fail("archive path is not canonical: " line);next}
     if(type!="-" && type!="d" && type!="l" && type!="h"){fail("unsupported archive entry type: " line);next}
-    if(type=="-")print line > regular
-    sub(/^\.\//,"",line);sub(/\/$/,"",line)
+    # GNU tar --verbatim-files-from requires the member spelling used in the
+    # archive (normally ./path), while the catalog below deliberately stores
+    # the canonical /path form.
+    if(type=="-")print original > regular
+    sub(/\/$/,"",line)
     if(!length(line)||line==".")next
     if((line in seen) && (type!="d" || seen[line]!="d")){fail("duplicate archive path: " line);next}
     seen[line]=type

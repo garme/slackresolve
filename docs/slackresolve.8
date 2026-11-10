@@ -1,4 +1,4 @@
-.TH SLACKRESOLVE 8 "2026-11-09" "SlackResolve 0.4.0"
+.TH SLACKRESOLVE 8 "2026-11-10" "SlackResolve 0.5.0"
 .SH NAME
 slackresolve \- find and install missing Slackware ELF dependencies
 .SH SYNOPSIS
@@ -36,10 +36,11 @@ SlackResolve locates exact filenames or package paths, examines dynamic ELF requ
 .PP
 Planning never installs packages. Applying a ready plan uses installpkg for additions and upgradepkg for replacements. Installed ELF consumers are checked before an upgrade is approved. Parallel package versions are accepted only when their files and library identities do not conflict.
 .PP
-Official MANIFEST data is indexed persistently. Unique missing providers are
-resolved in batches, while package archives and ELF metadata are reused from a
-content-addressed cache. Interrupted planning can be continued from an atomic
-session checkpoint.
+Official slackpkg filelist data and installed pkgtools records are indexed
+persistently. Unique missing providers are resolved in batches, while package
+archives and ELF metadata are reused from content-addressed caches. Cold ELF
+analysis can run in bounded parallel batches. Interrupted planning can be
+continued from an atomic session checkpoint.
 .SH OPTIONS
 .TP
 .B --arch ARCH
@@ -65,6 +66,13 @@ Validate and print apply operations without modifying the target.
 .TP
 .B --rebuild
 Rebuild the provider index for the current official repository state.
+.TP
+.BI --jobs " N"
+Use N concurrent jobs for cold ELF analysis. The default is 4; use 1 to disable it.
+.TP
+.B --profile
+Print per-stage and total elapsed time, cache status, provider lookups,
+fallbacks, downloads, analyses, cache hits, and graph passes.
 .SH FILES
 .I /var/lib/pkgtools/packages
 installed package records.

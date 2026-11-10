@@ -236,10 +236,7 @@ t_manifest_provider_index() {
     printf 'slackware64 srtest-lib 1.0 x86_64 1 srtest-lib-1.0-x86_64-1 ./slackware64/l txz\n' > "$CASE/data/pkglist"
     local digest; digest=$(md5sum "$FIX_REPO/srtest-lib-1.0-x86_64-1.txz")
     printf '%s  ./slackware64/l/srtest-lib-1.0-x86_64-1.txz\n' "${digest:0:32}" > "$CASE/data/CHECKSUMS.md5"
-    cat > "$CASE/data/MANIFEST" <<'EOF'
-||   Package: ./slackware64/l/srtest-lib-1.0-x86_64-1.txz
--rwxr-xr-x root/root 1 2026-01-01 00:00 usr/lib64/libsrtest.so.1
-EOF
+    printf './slackware64/l/srtest-lib-1.0-x86_64-1.txz usr/lib64/libsrtest.so.1\n' > "$CASE/data/filelist"
     cat > "$CASE/mock/slackpkg" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$SR_TEST_CALLS"
@@ -258,6 +255,17 @@ EOF
         --slackpkg-cache "$CASE/downloads" --output "$CASE/index.plan" "${OPTS[@]}" || return
     contains "$CASE/output" 'Status: ready' || return
     ! grep -Fq 'file-search' "$CASE/calls"
+}
+t_cycle_group() {
+    case_setup cycle-group
+    cp "$FIX_REPO/srcycle-a-1.0-x86_64-1.txz" "$FIX_REPO/srcycle-b-1.0-x86_64-1.txz" "$CASE/repo/"
+    expect 0 "$CLI" install "$FIX_REPO/srcycle-app-1.0-x86_64-1.txz" --repo "$CASE/repo" \
+        --output "$CASE/cycle.plan" --profile "${OPTS[@]}" || return
+    contains "$CASE/output" 'Status: ready' || return
+    contains "$CASE/output" 'Performance profile' || return
+    awk -F ':' '/Reused graph states:/ {gsub(/ /,"",$2); ok=($2+0)>=1} END{exit !ok}' "$CASE/output" || return 1
+    [[ $(awk -F '\t' '$1=="GROUP"{print $2}' "$CASE/cycle.plan" | sort -u | wc -l) == 1 ]] || return 1
+    [[ $(awk -F '\t' '$1=="GROUP"{n++} END{print n+0}' "$CASE/cycle.plan") == 2 ]]
 }
 t_resume_resolution() {
     case_setup resume
@@ -351,8 +359,9 @@ run_case resolve-dependencies-before-unknown-script t_unknown_script
 run_case model-official-gdk-pixbuf-cache-script t_modeled_gdk_pixbuf_script
 run_case official-slackpkg-download-contract t_slackpkg
 run_case official-slackpkg-i586-file-search t_slackpkg_i586
-run_case persistent-manifest-provider-index t_manifest_provider_index
+run_case persistent-slackpkg-filelist-index t_manifest_provider_index
 run_case resume-interrupted-resolution t_resume_resolution
+run_case cyclic-installation-group t_cycle_group
 run_case explicit-non-x86-architecture t_explicit_architecture
 run_case reject-stale-system-plan t_stale
 run_case dialog-package-workflow t_tui

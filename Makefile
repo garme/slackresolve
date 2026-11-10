@@ -1,7 +1,7 @@
 PREFIX ?= /usr
 DESTDIR ?=
 LIBDIR = $(PREFIX)/libexec/slackresolve
-VERSION = 0.4.0
+VERSION = 0.5.0
 
 .PHONY: all test check install uninstall dist slackware-package
 all: check

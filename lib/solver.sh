@@ -61,7 +61,9 @@ sr_overlay() {
             sr_fields "$line"; kind=${F[0]}; path=${F[1]}; target=${F[2]}; mode=${F[3]}
             [[ $kind == F || $kind == L || $kind == D ]] || continue
             [[ $path != /install && $path != /install/* ]] || continue
-            sr_norm "$path"; path=$REPLY
+            [[ $path == /* && $path != *'/../'* && $path != *'/./'* && $path != *//* ]] || {
+                sr_issue unconfirmed "$path" "${PK_FULL[$id]}" 'Archive path is not canonical.'; continue;
+            }
             if [[ $kind == F && $mode == *[sS]* ]]; then sr_issue unconfirmed "$path" "${PK_FULL[$id]}" 'Set-ID execution requires a separate loader profile.'; fi
             if [[ $kind == L ]]; then source=$target; else source=${PK_DIR[$id]}/root$path; fi
             if [[ ${OV_TYPE[$path]+yes} ]]; then
@@ -132,6 +134,29 @@ sr_overlay() {
     done
 }
 sr_graph() {
+    local graph_value graph_signature graph_dir state_line
+    graph_value=$({ printf '%s\n' "${SELECTED[@]}" | sort; printf 'A\t%s\n' "${AUDIT_ROOTS[@]}"; } | sha256sum)
+    graph_signature=${graph_value:0:64}; graph_dir=$SR_WORK/graph-cache/$graph_signature
+    if [[ -f $graph_dir/complete ]]; then
+        ((SR_PROFILE_GRAPH_HITS+=1))
+        cp -- "$graph_dir/issues" "$SR_WORK/issues"
+        cp -- "$graph_dir/edges" "$SR_WORK/edges"
+        FIRST_CODE=; FIRST_PATH=; FIRST_NEED=; FIRST_REASON=; FIRST_EID=
+        GRAPH_CONSUMER_EID=(); OV_OWNER=(); SELECTED_SET=()
+        for id in "${SELECTED[@]}"; do SELECTED_SET["$id"]=1; done
+        while IFS= read -r state_line; do
+            sr_fields "$state_line"
+            case ${F[0]} in
+                FIRST) FIRST_CODE=${F[1]}; FIRST_PATH=${F[2]}; FIRST_NEED=${F[3]}; FIRST_REASON=${F[4]}; FIRST_EID=${F[5]};;
+                CONSUMER) GRAPH_CONSUMER_EID["${F[1]}"$'\t'"${F[2]}"]=${F[3]};;
+                ACTION) PK_ACTION["${F[1]}"]=${F[2]}; PK_PREVIOUS["${F[1]}"]=${F[3]};;
+                OWNER) OV_OWNER["${F[1]}"]=${F[2]};;
+            esac
+        done < "$graph_dir/state"
+        [[ ! -s $SR_WORK/issues ]]
+        return
+    fi
+    ((SR_PROFILE_GRAPH_PASSES+=1))
     : > "$SR_WORK/issues"; : > "$SR_WORK/edges"
     FIRST_CODE=; FIRST_PATH=; FIRST_NEED=; FIRST_REASON=
     GRAPH_CONSUMER_EID=()
@@ -199,6 +224,21 @@ sr_graph() {
     done
     # A data-only package has no ELF dependency edges. Its package operation
     # remains valid, while non-ELF runtime requirements stay outside coverage.
+    local graph_tmp=$SR_WORK/graph-cache/.${graph_signature}.$$
+    mkdir -p -- "$graph_tmp"
+    cp -- "$SR_WORK/issues" "$graph_tmp/issues"
+    cp -- "$SR_WORK/edges" "$graph_tmp/edges"
+    {
+        sr_record FIRST "${FIRST_CODE:-}" "${FIRST_PATH:-}" "${FIRST_NEED:-}" "${FIRST_REASON:-}" "${FIRST_EID:-}"
+        for key in "${!GRAPH_CONSUMER_EID[@]}"; do
+            path=${key%%$'\t'*}; needed=${key#*$'\t'}
+            sr_record CONSUMER "$path" "$needed" "${GRAPH_CONSUMER_EID[$key]}"
+        done
+        for id in "${SELECTED[@]}"; do sr_record ACTION "$id" "${PK_ACTION[$id]}" "${PK_PREVIOUS[$id]:-}"; done
+        for path in "${!OV_OWNER[@]}"; do sr_record OWNER "$path" "${OV_OWNER[$path]}"; done
+    } > "$graph_tmp/state"
+    : > "$graph_tmp/complete"
+    if [[ ! -e $graph_dir ]]; then mv -- "$graph_tmp" "$graph_dir"; else rm -rf -- "$graph_tmp"; fi
     [[ ! -s $SR_WORK/issues ]]
 }
 sr_batch_unique_missing() {
@@ -286,20 +326,35 @@ sr_toposort() {
         from=${OV_OWNER[$consumer]:-}; [[ -n $from && $from != "$provider" ]] || continue
         printf 'E\t%s\t%s\n' "$from" "$provider" >> "$SR_WORK/order-input"
     done < "$SR_WORK/edges"
-    awk -F '\t' '
-        $1=="N" {nodes[$2]=1}
+    : > "$SR_WORK/groups"
+    awk -F '\t' -v groups="$SR_WORK/groups" 'BEGIN{OFS="\t"}
+        $1=="N" && !seen[$2]++ {node[++count]=$2}
         $1=="E" {edge[$2 SUBSEP $3]=1}
+        function sort_members(a,n, i,j,t){for(i=1;i<=n;i++)for(j=i+1;j<=n;j++)if(a[j]<a[i]){t=a[i];a[i]=a[j];a[j]=t}}
         END {
-            for(n in nodes)count++
-            while(donecount<count) {
-                best=""
-                for(n in nodes)if(!(n in done)) {
-                    blocked=0
-                    for(e in edge){split(e,a,SUBSEP);if(a[1]==n && !(a[2] in done))blocked=1}
-                    if(!blocked && (best==""||n<best))best=n
+            for(e in edge){split(e,a,SUBSEP);reach[a[1] SUBSEP a[2]]=1}
+            for(k=1;k<=count;k++)for(i=1;i<=count;i++)for(j=1;j<=count;j++)
+                if(reach[node[i] SUBSEP node[k]]&&reach[node[k] SUBSEP node[j]])reach[node[i] SUBSEP node[j]]=1
+            components=0
+            for(i=1;i<=count;i++)if(!(node[i] in component)){
+                components++; component[node[i]]=components
+                for(j=i+1;j<=count;j++)if(!(node[j] in component)&&reach[node[i] SUBSEP node[j]]&&reach[node[j] SUBSEP node[i]])component[node[j]]=components
+            }
+            for(i=1;i<=count;i++){c=component[node[i]];member_count[c]++;members[c SUBSEP member_count[c]]=node[i]}
+            for(e in edge){split(e,a,SUBSEP);x=component[a[1]];y=component[a[2]];if(x!=y)cdep[x SUBSEP y]=1}
+            while(done_components<components){
+                best=0;bestkey=""
+                for(c=1;c<=components;c++)if(!(c in cdone)){
+                    blocked=0;for(d in cdep){split(d,a,SUBSEP);if(a[1]==c&&!(a[2] in cdone))blocked=1}
+                    key=members[c SUBSEP 1];if(!blocked&&(best==0||key<bestkey)){best=c;bestkey=key}
                 }
-                if(best=="")exit 2
-                print best;done[best]=1;donecount++
+                if(best==0)exit 2
+                delete ordered
+                for(i=1;i<=member_count[best];i++)ordered[i]=members[best SUBSEP i]
+                sort_members(ordered,member_count[best])
+                if(member_count[best]>1)for(i=1;i<=member_count[best];i++)print "GROUP",done_components+1,ordered[i] > groups
+                for(i=1;i<=member_count[best];i++)print ordered[i]
+                cdone[best]=1;done_components++
             }
         }' "$SR_WORK/order-input" > "$SR_WORK/order"
 }

@@ -4,7 +4,7 @@ set -o pipefail
 SR_BINDIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 if [[ -f $SR_BINDIR/../lib/common.sh ]]; then SR_LIBDIR=$SR_BINDIR/../lib
 else SR_LIBDIR=${SLACKRESOLVE_LIBDIR:-/usr/libexec/slackresolve/lib}; fi
-for sr_module in common elf archive repository loader solver session plan; do
+for sr_module in common system elf archive repository loader solver session plan; do
     source "$SR_LIBDIR/$sr_module.sh" || exit 1
 done
 SR_CLI_PATH=$SR_BINDIR/slackresolve
@@ -37,8 +37,10 @@ Options:
   --slackpkg-cache DIR     downloaded packages (default: /var/cache/packages).
   --max-candidates N       Maximum provider archives examined (default: 64).
   --max-search N           Maximum dependency selections examined (default: 128).
+  --jobs N                 Concurrent cold ELF analyses (default: 4).
   --dry-run                Validate an apply plan without changing the target.
   --rebuild                Rebuild the cached official file-provider index.
+  --profile                Print cache and performance measurements.
   --version                Print the version.
 
 Planning never installs packages. Apply uses installpkg for additions and
@@ -71,28 +73,30 @@ if [[ $1 == sessions || $1 == resume ]]; then
 fi
 SR_COMMAND=$1; shift
 SR_ROOT=/; SR_ROOT_SET=0; SR_REPO=slackpkg; SR_OUTPUT=; SR_MAX_CANDIDATES=64; SR_MAX_SEARCH=128
-SR_DRY_RUN=0; SR_PREFER=; SR_AUDIT_SYSTEM=0; SR_ARCH_OVERRIDE=; SR_REBUILD_INDEX=0; SR_RESUME_SESSION=
+SR_DRY_RUN=0; SR_PREFER=; SR_AUDIT_SYSTEM=0; SR_ARCH_OVERRIDE=; SR_REBUILD_INDEX=0; SR_RESUME_SESSION=; SR_PROFILE=0; SR_JOBS=4
 declare -a SR_INPUTS=()
 while (( $# )); do
     case $1 in
-        --root|--arch|--repo|--cache|--blacklist|--prefer|--slackpkg-data|--slackpkg-cache|--max-candidates|--max-search|--output|--resume-session)
+        --root|--arch|--repo|--cache|--blacklist|--prefer|--slackpkg-data|--slackpkg-cache|--max-candidates|--max-search|--jobs|--output|--resume-session)
             (( $# >= 2 )) || sr_die "Missing value: $1"
             case $1 in
                 --root) SR_ROOT=$2; SR_ROOT_SET=1;; --arch) SR_ARCH_OVERRIDE=$2;; --repo) SR_REPO=$2;; --cache) SR_CACHE=$2;;
                 --blacklist) SR_BLACKLIST=$2;; --prefer) SR_PREFER=$2;;
                 --slackpkg-data) SR_SLACK_DATA=$2;; --slackpkg-cache) SR_SLACK_CACHE=$2;;
-                --max-candidates) SR_MAX_CANDIDATES=$2;; --max-search) SR_MAX_SEARCH=$2;; --output) SR_OUTPUT=$2;;
+                --max-candidates) SR_MAX_CANDIDATES=$2;; --max-search) SR_MAX_SEARCH=$2;; --jobs) SR_JOBS=$2;; --output) SR_OUTPUT=$2;;
                 --resume-session) SR_RESUME_SESSION=$2;;
             esac; shift 2;;
         --dry-run) SR_DRY_RUN=1; shift;;
         --rebuild) SR_REBUILD_INDEX=1; shift;;
+        --profile) SR_PROFILE=1; shift;;
         --help|-h) sr_help; exit;;
         --) shift; SR_INPUTS+=("$@"); break;;
         -*) sr_die "Unknown option: $1";;
         *) SR_INPUTS+=("$1"); shift;;
     esac
 done
-[[ $SR_MAX_CANDIDATES =~ ^[1-9][0-9]*$ && $SR_MAX_SEARCH =~ ^[1-9][0-9]*$ ]] || sr_die 'Search limits must be positive integers.'
+[[ $SR_MAX_CANDIDATES =~ ^[1-9][0-9]*$ && $SR_MAX_SEARCH =~ ^[1-9][0-9]*$ && $SR_JOBS =~ ^[1-9][0-9]*$ ]] || sr_die 'Search limits and jobs must be positive integers.'
+sr_clock; SR_PROFILE_STARTED=$REPLY
 
 case $SR_COMMAND in
     show|apply|verify)
@@ -123,15 +127,20 @@ case $SR_COMMAND in
     *) sr_die "Unknown command: $SR_COMMAND";;
 esac
 
+sr_clock; sr_stage_started=$REPLY
 sr_init
+SR_PROFILE_INIT_SECONDS=$(sr_seconds_since "$sr_stage_started")
 [[ $SR_RELEASE != unknown ]] || sr_log 'Warning: the target was not identified as Slackware.'
 sr_progress 5 'Reading official package indexes...'
+sr_clock; sr_stage_started=$REPLY
 sr_repo_load
+SR_PROFILE_REPO_SECONDS=$(sr_seconds_since "$sr_stage_started")
 if [[ $SR_COMMAND == index ]]; then
     printf 'Repository signature: %s\nProvider index: %s\n' "$SR_REPO_SIGNATURE" "${SR_PROVIDER_INDEX:-not required for a local repository}"
     exit 0
 fi
 sr_session_start
+sr_clock; sr_stage_started=$REPLY
 
 if [[ $SR_COMMAND == search-file ]]; then
     sr_query=${SR_INPUTS[0]}
@@ -176,8 +185,10 @@ else
 fi
 
 sr_session_restore
+SR_PROFILE_INPUT_SECONDS=$(sr_seconds_since "$sr_stage_started")
 
 sr_progress 25 'Checking libraries and locating official provider packages...'
+sr_clock; sr_stage_started=$REPLY
 sr_solve 0
 mapfile -t SR_SOLUTIONS < <(find "$SR_WORK" -maxdepth 1 -type f -name 'solution.*' | sort)
 if (( ${#SR_SOLUTIONS[@]} == 1 && SR_LIMIT_HIT == 0 )); then
@@ -189,6 +200,7 @@ else
     if (( ${#SR_SOLUTIONS[@]} > 1 )); then sr_issue ambiguous '' '' 'Several complete provider selections exist; use --prefer with a package name.'; fi
     if (( SR_LIMIT_HIT )); then sr_issue unconfirmed '' '' 'The search limit was reached; completeness was not established.'; fi
 fi
+SR_PROFILE_SOLVER_SECONDS=$(sr_seconds_since "$sr_stage_started")
 
 SR_STATUS=ready
 if (( ${#SELECTED[@]} )); then
@@ -198,9 +210,12 @@ fi
 
 if [[ -n $SR_OUTPUT && ${#SELECTED[@]} -gt 0 ]]; then
     sr_progress 90 'Saving the plan and exact package archives...'
+    sr_clock; sr_stage_started=$REPLY
     sr_plan_write "$SR_OUTPUT" "$SR_STATUS" || sr_die 'Could not save the plan.'
     sr_plan_read "$SR_OUTPUT"; sr_explain
+    SR_PROFILE_PLAN_SECONDS=$(sr_seconds_since "$sr_stage_started")
 else
+    SR_PROFILE_PLAN_SECONDS=0.000
     printf 'Status: %s\n' "$SR_STATUS"
     if (( ${#SELECTED[@]} == 0 )); then
         printf 'No package operation is required.\n'
@@ -213,4 +228,5 @@ else
 fi
 sr_progress 100 'Analysis completed.'
 sr_session_finish "$SR_STATUS" || sr_die 'Could not finalize the resolution session.'
+sr_profile_report
 [[ $SR_STATUS == ready ]]

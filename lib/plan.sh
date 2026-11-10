@@ -14,7 +14,7 @@ sr_db_signature() {
     sr_hash "$SR_WORK/db-state"
 }
 sr_plan_write() {
-    local output=$1 status=$2 id line path kind value mode hash filename rootdir
+    local output=$1 status=$2 id line path kind value mode hash filename rootdir elfline
     sr_norm "$output"; output=$REPLY
     [[ ! -e $output && ! -e $output.d ]] || sr_die "Output already exists: $output (choose another filename)."
     mkdir -p -- "${output%/*}" || return 1
@@ -37,20 +37,23 @@ sr_plan_write() {
         sr_record META library_path "${SR_LIBRARY_PATH:-}"
         sr_record META coverage 'ELF runtime dependencies and versioned symbols; declared loader profile; supported installation scripts only. Language modules, arbitrary dlopen, scripts and full ABI semantics are not inferred.'
         for id in "${SELECTED[@]}"; do
+            declare -A plan_elf=()
+            while IFS= read -r elfline; do sr_fields "$elfline"; plan_elf["${F[0]}"]=1; done < "${PK_ELFS[$id]}"
             filename=${PK_ARCHIVE[$id]##*/}; mkdir -p -- "$rootdir/data/archives/$id"
-            cp -- "${PK_ARCHIVE[$id]}" "$rootdir/data/archives/$id/$filename" || return 1
+            cp --reflink=auto -- "${PK_ARCHIVE[$id]}" "$rootdir/data/archives/$id/$filename" || return 1
             sr_record PACKAGE "$id" "${PK_FULL[$id]}" "${output##*/}.d/archives/$id/$filename" "${PK_HASH[$id]}" "${PK_ORIGIN[$id]}" "${PK_ACTION[$id]}" "${PK_PREVIOUS[$id]:-}"
             while IFS= read -r line; do
                 sr_fields "$line"; kind=${F[0]}; path=${F[1]}; value=${F[2]}; mode=${F[3]}
-                [[ $kind == F || $kind == L || $kind == D ]] || continue
+                [[ $kind == L || ( $kind == F && ${plan_elf[$path]+yes} ) ]] || continue
                 [[ $path != /install && $path != /install/* ]] || continue
-                sr_norm "$path"; path=$REPLY
                 if [[ $kind == F ]]; then sr_hash "${PK_DIR[$id]}/root$path" || return 1; value=$REPLY; fi
                 sr_record FILE "$id" "$path" "$kind" "$value" "$mode"
             done < "${PK_DIR[$id]}/files"
+            unset plan_elf
         done
         cat "$SR_WORK/edges" "$SR_WORK/issues"
         [[ ! -f $SR_WORK/rejections ]] || cat "$SR_WORK/rejections"
+        [[ ! -f $SR_WORK/groups ]] || cat "$SR_WORK/groups"
         while IFS= read -r id; do [[ -z $id ]] || sr_record ORDER "$id"; done < "$SR_WORK/order"
         if (( ${#GUARD_KIND[@]} )); then
             while IFS= read -r -d '' path; do sr_record GUARD "$path" "${GUARD_KIND[$path]}" "${GUARD_VALUE[$path]}"; done < <(printf '%s\0' "${!GUARD_KIND[@]}" | sort -z)
@@ -67,8 +70,8 @@ sr_plan_read() {
     [[ -f $plan ]] || sr_die "Plan file not found: $plan"
     sr_control_path "$plan" || sr_die 'Unsupported characters in plan filename.'
     sr_norm "$plan"; PLAN_PATH=$REPLY; PLAN_DIR=${PLAN_PATH%/*}
-    declare -gA PLAN_META=() PLAN_FULL=() PLAN_ARCHIVE=() PLAN_HASH=() PLAN_ACTION=() PLAN_PREVIOUS=() PLAN_GK=() PLAN_GV=()
-    declare -ga PLAN_IDS=() PLAN_ORDER=() PLAN_FILES=() PLAN_EDGES=() PLAN_ISSUES=() PLAN_REJECTIONS=()
+    declare -gA PLAN_META=() PLAN_FULL=() PLAN_ARCHIVE=() PLAN_HASH=() PLAN_ACTION=() PLAN_PREVIOUS=() PLAN_GK=() PLAN_GV=() PLAN_GROUP_ID=()
+    declare -ga PLAN_IDS=() PLAN_ORDER=() PLAN_FILES=() PLAN_EDGES=() PLAN_ISSUES=() PLAN_REJECTIONS=() PLAN_GROUPS=()
     while IFS= read -r line || [[ -n $line ]]; do
         sr_fields "$line"; kind=${F[0]:-}
         if (( ! header )); then
@@ -93,6 +96,7 @@ sr_plan_read() {
             EDGE) [[ ${#F[@]} == 7 ]] || sr_die 'Invalid EDGE record.'; PLAN_EDGES+=("$line");;
             ISSUE) [[ ${#F[@]} == 5 ]] || sr_die 'Invalid ISSUE record.'; PLAN_ISSUES+=("$line");;
             REJECT) PLAN_REJECTIONS+=("$line");;
+            GROUP) [[ ${#F[@]} == 3 && ${F[2]} =~ ^[a-f0-9]{64}$ ]] || sr_die 'Invalid GROUP record.'; PLAN_GROUPS+=("$line"); PLAN_GROUP_ID["${F[2]}"]=${F[1]};;
             *) sr_die "Unknown plan record: $kind";;
         esac
     done < "$PLAN_PATH"
@@ -176,6 +180,20 @@ sr_guard_check() {
     sr_db_signature || return 1
     [[ $REPLY == "${PLAN_META[database]}" ]] || { sr_log 'Installed package records changed; generate a new plan.'; return 1; }
 }
+sr_refresh_runtime_caches() {
+    if command -v ldconfig >/dev/null; then
+        if [[ $SR_ROOT == / ]]; then ldconfig || return 1; else ldconfig -r "$SR_ROOT" || return 1; fi
+    fi
+    if [[ $SR_ROOT == / ]]; then
+        if command -v fc-cache >/dev/null; then fc-cache -f >/dev/null 2>&1 || return 1; fi
+        if command -v update-gdk-pixbuf-loaders >/dev/null; then update-gdk-pixbuf-loaders >/dev/null 2>&1 || return 1
+        elif command -v gdk-pixbuf-query-loaders >/dev/null; then gdk-pixbuf-query-loaders --update-cache >/dev/null 2>&1 || return 1; fi
+    elif command -v chroot >/dev/null; then
+        [[ ! -x $SR_ROOT/usr/bin/fc-cache ]] || chroot "$SR_ROOT" /usr/bin/fc-cache -f >/dev/null 2>&1 || return 1
+        if [[ -x $SR_ROOT/usr/bin/update-gdk-pixbuf-loaders ]]; then chroot "$SR_ROOT" /usr/bin/update-gdk-pixbuf-loaders >/dev/null 2>&1 || return 1
+        elif [[ -x $SR_ROOT/usr/bin/gdk-pixbuf-query-loaders ]]; then chroot "$SR_ROOT" /usr/bin/gdk-pixbuf-query-loaders --update-cache >/dev/null 2>&1 || return 1; fi
+    fi
+}
 sr_apply() {
     local id archive line state journal=$PLAN_PATH.journal hash installer lock action
     [[ ${PLAN_META[status]} == ready && ${#PLAN_ISSUES[@]} == 0 ]] || sr_die 'This plan has pending decisions. Installation is blocked.'
@@ -257,6 +275,7 @@ sr_apply() {
             else ldconfig -r "$SR_ROOT" || sr_die 'Target ldconfig failed.'; fi
         fi
     done
+    sr_refresh_runtime_caches || sr_die 'A runtime cache refresh failed after package installation.'
     printf 'Application completed.\n'
     sr_check
 }

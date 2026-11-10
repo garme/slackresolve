@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Shared primitives. All persistent records are data, never sourced as shell.
-SR_VERSION=0.3.3
+SR_VERSION=0.4.0
 SR_SCHEMA=3
 SR_ANALYZER=4
 export LC_ALL=C
@@ -95,7 +95,8 @@ sr_init() {
     sr_norm "$SR_CACHE"; SR_CACHE=$REPLY
     SR_WORK=$(mktemp -d "$SR_CACHE/work.XXXXXXXX") || sr_die 'Could not create the work directory.'
     trap '[[ -z ${SR_WORK:-} ]] || rm -rf -- "$SR_WORK"' EXIT
-    mkdir -p -- "$SR_CACHE/archives" "$SR_CACHE/objects" "$SR_CACHE/elf/$SR_ANALYZER"
+    mkdir -p -- "$SR_CACHE/archives" "$SR_CACHE/objects" "$SR_CACHE/elf/$SR_ANALYZER" \
+        "$SR_CACHE/indexes" "$SR_CACHE/searches" "$SR_CACHE/sessions"
     SR_PKGDB=
     for c in /var/lib/pkgtools/packages /var/log/packages /var/adm/packages; do
         if [[ -d ${SR_ROOT%/}$c ]]; then SR_PKGDB=${SR_ROOT%/}$c; break; fi
@@ -137,7 +138,9 @@ sr_init() {
     declare -gA OV_TYPE=() OV_SOURCE=() OV_OWNER=() GUARD_KIND=() GUARD_VALUE=()
     declare -ga SELECTED=() ROOT_PACKAGES=() REPO_IDS=() LD_PATHS=() AUDIT_ROOTS=()
     declare -gA RP_PATH=() RP_RANK=() RP_ORIGIN=() RP_FULL=() RP_BASE=()
-    declare -gA RP_MANIFEST=() RP_ARCH=() SELECTED_SET=()
+    declare -gA RP_MANIFEST=() RP_ARCH=() RP_BY_FULL=() RP_FETCHED_ID=()
+    declare -gA PROVIDER_RIDS=() SEARCH_RESULT=() SELECTED_SET=()
+    declare -gA GRAPH_CONSUMER_EID=()
     SR_SEARCH_COUNT=0; SR_LIMIT_HIT=0; SR_BEST_DEPTH=-1; SR_BEST_SELECTED=
     : > "$SR_WORK/rejections"; : > "$SR_WORK/solutions"
     sr_loader_paths

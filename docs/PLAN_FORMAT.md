@@ -22,3 +22,8 @@ Schema 3 records the detected target package architecture. Apply and verify
 reject a plan when its architecture differs from the current target.
 
 The adjacent `PLAN.d/` directory holds the exact package archives. A ready plan has no issue records and has one complete operation order. Unknown records, unsupported schemas, missing archives, changed hashes, and paths escaping the plan directory are rejected.
+
+Resolution sessions are separate from plans. They live under the selected
+cache directory in `sessions/`, contain only escaped tab-separated records,
+and are never sourced as shell programs. A checkpoint may accelerate continued
+analysis, but it is not actionable: only a complete, ready plan can be applied.

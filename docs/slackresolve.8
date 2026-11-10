@@ -1,4 +1,4 @@
-.TH SLACKRESOLVE 8 "2026-11-08" "SlackResolve 0.3.3"
+.TH SLACKRESOLVE 8 "2026-11-09" "SlackResolve 0.4.0"
 .SH NAME
 slackresolve \- find and install missing Slackware ELF dependencies
 .SH SYNOPSIS
@@ -14,6 +14,15 @@ FILE [--output PLAN] [options]
 .B slackresolve install
 PACKAGE|ARCHIVE [--output PLAN] [options]
 .br
+.B slackresolve index
+[--rebuild] [options]
+.br
+.B slackresolve sessions
+[--cache DIR]
+.br
+.B slackresolve resume
+SESSION [--cache DIR]
+.br
 .B slackresolve show
 PLAN
 .br
@@ -26,6 +35,11 @@ PLAN
 SlackResolve locates exact filenames or package paths, examines dynamic ELF requirements, searches official Slackware package contents through slackpkg, follows provider dependencies recursively, and saves exact package archives in a reviewable plan.
 .PP
 Planning never installs packages. Applying a ready plan uses installpkg for additions and upgradepkg for replacements. Installed ELF consumers are checked before an upgrade is approved. Parallel package versions are accepted only when their files and library identities do not conflict.
+.PP
+Official MANIFEST data is indexed persistently. Unique missing providers are
+resolved in batches, while package archives and ELF metadata are reused from a
+content-addressed cache. Interrupted planning can be continued from an atomic
+session checkpoint.
 .SH OPTIONS
 .TP
 .B --arch ARCH
@@ -48,6 +62,9 @@ Prefer named packages when several compatible providers exist.
 .TP
 .B --dry-run
 Validate and print apply operations without modifying the target.
+.TP
+.B --rebuild
+Rebuild the provider index for the current official repository state.
 .SH FILES
 .I /var/lib/pkgtools/packages
 installed package records.
@@ -57,5 +74,8 @@ official slackpkg indexes.
 .br
 .I /var/cache/packages
 archives downloaded by slackpkg.
+.br
+.I ~/.cache/slackresolve
+provider indexes, search results, package analysis, and resolution sessions.
 .SH SEE ALSO
 slackpkg(8), installpkg(8), upgradepkg(8), ldconfig(8), readelf(1), dialog(1)

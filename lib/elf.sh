@@ -2,6 +2,11 @@
 sr_elf() {
     local physical=$1 id dest tmp line key magic
     [[ -f $physical ]] || return 1
+    if [[ ${ELF_ID[$physical]+yes} ]]; then
+        id=${ELF_ID[$physical]}; E_ID=$id
+        [[ ${M_TYPE[$id]:-} == EXEC || ${M_TYPE[$id]:-} == DYN ]]
+        return
+    fi
     IFS= read -r -N 4 magic < "$physical" || :
     [[ $magic == $'\177ELF' ]] || return 1
     sr_hash "$physical" || return; id=$REPLY; ELF_ID["$physical"]=$id

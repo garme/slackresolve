@@ -4,7 +4,7 @@ SlackResolve finds packages containing missing files and resolves ELF library de
 
 The application is written in Bash and awk. It uses Slackware's existing package records, `slackpkg`, `installpkg`, `upgradepkg`, `ldconfig`, and the official repository indexes. Packages do not need embedded dependency metadata.
 
-Version **0.3.3** provides four direct workflows:
+Version **0.4.0** provides four direct workflows:
 
 1. Check an installed program.
 2. Find the package containing an exact filename or package path.
@@ -22,10 +22,15 @@ architecture matches the target. Slackware 15.0 is the reference release.
 - Detects the target package architecture and rejects foreign-architecture
   candidates. Use `--arch` only when analyzing an incomplete alternate root.
 - Resolves libraries through the target's loader paths, cache, RPATH and RUNPATH.
-- Uses `slackpkg file-search` to locate official packages containing a missing library.
+- Builds a persistent provider index from Slackware's official `MANIFEST`
+  files, avoiding a separate `slackpkg file-search` process for every library.
+- Caches fallback `slackpkg file-search` results by repository state.
 - Confirms an exact basename such as `libabc.so.1`, or an exact package path such as `/usr/bin/example`, inside downloaded candidates.
 - Downloads candidates with `slackpkg download`, verifies them, and inspects their actual ELF contents.
-- Repeats the analysis for every selected provider until the dependency chain is complete.
+- Resolves unique providers in dependency rounds, deduplicating packages before
+  the next recursive analysis.
+- Reuses downloaded archives, extracted packages, and ELF metadata.
+- Saves automatic checkpoints and can continue an interrupted resolution.
 - Continues closing searchable ELF dependencies even when a separate package
   installation-script effect still requires review.
 - Models the fixed loader-cache update used by official `gdk-pixbuf2`
@@ -59,14 +64,14 @@ slackpkg update
 Install the included native package:
 
 ```sh
-installpkg dist/slackresolve-0.3.3-noarch-1.txz
+installpkg dist/slackresolve-0.4.0-noarch-1.txz
 ```
 
 Or build it from the source tree:
 
 ```sh
 make slackware-package
-installpkg dist/slackresolve-0.3.3-noarch-1.txz
+installpkg dist/slackresolve-0.4.0-noarch-1.txz
 ```
 
 The CLI is installed as `/usr/sbin/slackresolve`. The terminal interface is installed as `/usr/bin/slackresolve-tui` and is also available from the desktop menu.
@@ -88,6 +93,8 @@ The main menu contains:
 - **Review a saved plan**: show marked install, upgrade, and keep operations and dependency evidence.
 - **Apply a saved plan**: review, confirm, and execute every marked operation.
 - **Verify an applied plan**: compare installed package payloads and providers with the plan.
+- **Resume an interrupted resolution**: select a saved session and continue
+  from its last compatible checkpoint.
 - **Repository and provider preferences**: choose official slackpkg indexes or a local package directory and resolve genuine provider alternatives.
 
 Use arrow keys, Tab, Enter, and Esc. Planning does not modify the system. Applying to `/` requires a root shell.
@@ -135,6 +142,34 @@ slackresolve check-system \
 ```
 
 The audit starts from ELF files listed in `/var/lib/pkgtools/packages`. Identical missing requirements are resolved once and shared by every affected consumer. Derived ELF metadata is cached by file hash, so unchanged files do not need to be parsed again.
+
+### Build or refresh the provider index
+
+```sh
+slackresolve index
+slackresolve index --rebuild
+```
+
+The index is derived from the official Slackware `MANIFEST` files already
+maintained by `slackpkg`. It is keyed by the release, architecture, and current
+repository-index state. Normal resolution builds it automatically; the command
+above is useful for preparing or explicitly refreshing the cache.
+
+### Continue an interrupted resolution
+
+Planning commands create a session automatically. Pressing Ctrl+C in the CLI,
+or Esc during a planning gauge in the terminal interface, writes an atomic
+checkpoint instead of discarding the work.
+
+```sh
+slackresolve sessions
+slackresolve resume SESSION_ID
+```
+
+If the installed package database, target architecture, or repository indexes
+changed, SlackResolve safely rebuilds the graph while retaining reusable
+downloads and ELF cache entries. Session files are tab-separated data and are
+never evaluated as shell code.
 
 ### Analyze a local package before installation
 
@@ -208,7 +243,7 @@ Run:
 make test
 ```
 
-The suite builds real ELF programs and libraries and checks generic file lookup, recursive dependencies from a found library, data-only packages, provider selection, program repair, complete-system auditing, official `slackpkg file-search` and download contracts, dependency-first application, safe upgrades, blocked ABI-breaking upgrades, parallel versions, stale plans, and the `dialog` workflow.
+The suite builds real ELF programs and libraries and checks generic file lookup, recursive dependencies from a found library, data-only packages, provider selection, program repair, complete-system auditing, persistent manifest indexing, interrupted-session continuation, official `slackpkg file-search` and download contracts, dependency-first application, safe upgrades, blocked ABI-breaking upgrades, parallel versions, stale plans, and the `dialog` workflow.
 
 Tests use temporary Slackware-like roots and controlled pkgtools/slackpkg stand-ins; they never install fixture packages on the host. Native acceptance on a disposable Slackware installation is still recommended before production use.
 
@@ -218,11 +253,23 @@ Tests use temporary Slackware-like roots and controlled pkgtools/slackpkg stand-
 | --- | --- |
 | `bin/slackresolve` | Command-line interface |
 | `bin/slackresolve-tui` | `dialog` terminal interface |
-| `lib/` | ELF, archive, repository, solver, loader, and plan modules |
+| `lib/` | ELF, archive, repository, solver, session, loader, and plan modules |
 | `awk/` | Structured parsers |
 | `tests/` | Real ELF fixtures and integration tests |
 | `packaging/` | SlackBuild and package description |
 | `docs/` | Architecture, plan format, validation notes, and manual page |
+
+## Publishing on GitHub
+
+Create an empty repository and run from this directory:
+
+```sh
+git init -b main
+git add .
+git commit -m "Initial SlackResolve release"
+git remote add origin https://github.com/YOUR_USERNAME/slackresolve.git
+git push -u origin main
+```
 
 ## License
 

@@ -231,6 +231,50 @@ EOF
     contains "$CASE/output" 'Status: ready' || return
     grep -Fq $'META\tarchitecture\ti586' "$CASE/i586.plan"
 }
+t_manifest_provider_index() {
+    case_setup provider-index; mkdir -p "$CASE/data" "$CASE/downloads"
+    printf 'slackware64 srtest-lib 1.0 x86_64 1 srtest-lib-1.0-x86_64-1 ./slackware64/l txz\n' > "$CASE/data/pkglist"
+    local digest; digest=$(md5sum "$FIX_REPO/srtest-lib-1.0-x86_64-1.txz")
+    printf '%s  ./slackware64/l/srtest-lib-1.0-x86_64-1.txz\n' "${digest:0:32}" > "$CASE/data/CHECKSUMS.md5"
+    cat > "$CASE/data/MANIFEST" <<'EOF'
+||   Package: ./slackware64/l/srtest-lib-1.0-x86_64-1.txz
+-rwxr-xr-x root/root 1 2026-01-01 00:00 usr/lib64/libsrtest.so.1
+EOF
+    cat > "$CASE/mock/slackpkg" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$SR_TEST_CALLS"
+if [[ $* == *'file-search'* ]]; then exit 9
+elif [[ $* == *'-checkgpg=on'* && $* == *'-checkmd5=on'* && $* == *'download srtest-lib-1.0-x86_64-1'* ]]; then
+    cp "$SR_TEST_FIXTURE" "$SR_TEST_DOWNLOAD/"
+    printf signature > "$SR_TEST_DOWNLOAD/${SR_TEST_FIXTURE##*/}.asc"
+else exit 9
+fi
+EOF
+    printf '#!/bin/bash\nexit 0\n' > "$CASE/mock/gpg"
+    chmod +x "$CASE/mock/slackpkg" "$CASE/mock/gpg"
+    expect 0 env PATH="$CASE/mock:$PATH" SR_TEST_FIXTURE="$FIX_REPO/srtest-lib-1.0-x86_64-1.txz" \
+        SR_TEST_DOWNLOAD="$CASE/downloads" SR_TEST_CALLS="$CASE/calls" \
+        "$CLI" search-file libsrtest.so.1 --repo slackpkg --slackpkg-data "$CASE/data" \
+        --slackpkg-cache "$CASE/downloads" --output "$CASE/index.plan" "${OPTS[@]}" || return
+    contains "$CASE/output" 'Status: ready' || return
+    ! grep -Fq 'file-search' "$CASE/calls"
+}
+t_resume_resolution() {
+    case_setup resume
+    cp "$FIX_REPO/srleaf-1.0-x86_64-1.txz" "$FIX_REPO/srchain-1.0-x86_64-1.txz" "$CASE/repo/"
+    env SLACKRESOLVE_TEST_INTERRUPT_DEPTH=1 "$CLI" search-file libsrchain.so.1 --repo "$CASE/repo" \
+        --output "$CASE/resume.plan" "${OPTS[@]}" > "$CASE/output" 2>&1
+    local status=$? session
+    [[ $status == 130 ]] || { printf 'Expected interrupted exit 130, got %s\n' "$status"; cat "$CASE/output"; return 1; }
+    session=$(awk '/^Resolution session:/ {print $3; exit}' "$CASE/output")
+    [[ -n $session && -f $WORK/cache/sessions/$session/checkpoint.tsv ]] || return 1
+    grep -Fq $'META\tstatus\tinterrupted' "$WORK/cache/sessions/$session/session.meta" || return 1
+    expect 0 "$CLI" resume "$session" --cache "$WORK/cache" || return
+    contains "$CASE/output" 'Resuming resolution session' || return
+    contains "$CASE/output" 'Restored packages from checkpoint' || return
+    contains "$CASE/output" 'Status: ready' || return
+    [[ -f $CASE/resume.plan ]]
+}
 t_explicit_architecture() {
     case_setup architecture; mkdir -p "$CASE/tree/usr/share/slackresolve"
     printf 'architecture fixture\n' > "$CASE/tree/usr/share/slackresolve/architecture.dat"
@@ -307,6 +351,8 @@ run_case resolve-dependencies-before-unknown-script t_unknown_script
 run_case model-official-gdk-pixbuf-cache-script t_modeled_gdk_pixbuf_script
 run_case official-slackpkg-download-contract t_slackpkg
 run_case official-slackpkg-i586-file-search t_slackpkg_i586
+run_case persistent-manifest-provider-index t_manifest_provider_index
+run_case resume-interrupted-resolution t_resume_resolution
 run_case explicit-non-x86-architecture t_explicit_architecture
 run_case reject-stale-system-plan t_stale
 run_case dialog-package-workflow t_tui

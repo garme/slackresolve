@@ -4,11 +4,14 @@ set -o pipefail
 TUI_BINDIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 if [[ -x $TUI_BINDIR/slackresolve ]]; then CLI=$TUI_BINDIR/slackresolve; else CLI=/usr/sbin/slackresolve; fi
 DIALOG=${DIALOG:-dialog}
-declare -a TUI_OPTIONS=()
+declare -a TUI_OPTIONS=() TUI_SESSION_OPTIONS=()
 TUI_REPO=slackpkg; TUI_ROOT=/; TUI_PREFER=; TUI_LAST_PLAN=
 while (( $# )); do
     case $1 in
-        --root|--cache) (( $# >= 2 )) || exit 1; TUI_OPTIONS+=("$1" "$2"); [[ $1 != --root ]] || TUI_ROOT=$2; shift 2;;
+        --root|--cache)
+            (( $# >= 2 )) || exit 1; TUI_OPTIONS+=("$1" "$2")
+            if [[ $1 == --root ]]; then TUI_ROOT=$2; else TUI_SESSION_OPTIONS+=("$1" "$2"); fi
+            shift 2;;
         --repo) (( $# >= 2 )) || exit 1; TUI_REPO=$2; shift 2;;
         --help|-h) printf 'Usage: slackresolve-tui [--root DIR] [--repo DIR|slackpkg] [--cache DIR]\n'; exit;;
         *) printf 'Unknown option: %s\n' "$1" >&2; exit 1;;
@@ -45,7 +48,7 @@ tui_plan_name() {
 }
 tui_run() {
     local title=$1; shift
-    local log=$TUI_WORK/results progress=$TUI_WORK/progress status=$TUI_WORK/status pid result percent message
+    local log=$TUI_WORK/results progress=$TUI_WORK/progress status=$TUI_WORK/status pid result percent message dialog_status
     : > "$log"; printf '0\tStarting...\n' > "$progress"; rm -f -- "$status"
     ( SLACKRESOLVE_PROGRESS_FILE="$progress" "$CLI" "$@" > "$log" 2>&1; printf '%s\n' "$?" > "$status" ) & pid=$!
     tui_dimensions
@@ -57,7 +60,9 @@ tui_run() {
             sleep 0.2
         done
         printf '100\n'
-    } | "$DIALOG" --input-fd "$TUI_TTY" --title "$title" --no-cancel --gauge 'Working...' 9 "$TUI_WIDTH" 0 >&"$TUI_TTY" 2>&"$TUI_TTY"
+    } | "$DIALOG" --input-fd "$TUI_TTY" --title "$title" --gauge 'Working... Press Esc to save the session and stop.' 9 "$TUI_WIDTH" 0 >&"$TUI_TTY" 2>&"$TUI_TTY"
+    dialog_status=$?
+    if (( dialog_status != 0 )) && kill -0 "$pid" 2>/dev/null; then kill -INT "$pid" 2>/dev/null || :; fi
     wait "$pid" || :; result=1; [[ ! -f $status ]] || read -r result < "$status"
     if [[ $result == 0 ]]; then title="$title - completed"; else title="$title - review required"; fi
     tui_view --title "$title" --textbox "$log" 0 0
@@ -69,11 +74,12 @@ tui_resolve_options() {
 }
 while :; do
     choice=$(tui_select --title SlackResolve --menu \
-        "Find and install missing Slackware files and ELF dependencies.\nTarget: $TUI_ROOT\nRepository: $TUI_REPO" 0 0 9 \
+        "Find and install missing Slackware files and ELF dependencies.\nTarget: $TUI_ROOT\nRepository: $TUI_REPO" 0 0 10 \
         program 'Check an installed program' \
         file 'Find the package containing a file' \
         system 'Check the complete system' \
         package 'Install a package with dependencies' \
+        resume 'Resume an interrupted resolution' \
         review 'Review a saved plan' \
         apply 'Apply a saved plan' \
         verify 'Verify an applied plan' \
@@ -107,6 +113,11 @@ while :; do
             plan=$(tui_plan_name) || continue; [[ -n $plan ]] || continue
             tui_resolve_options; tui_run 'Package dependency plan' install "$package" --output "$plan" "${RESOLVE_OPTIONS[@]}" || :
             [[ ! -f $plan ]] || TUI_LAST_PLAN=$plan;;
+        resume)
+            tui_run 'Saved resolution sessions' sessions "${TUI_SESSION_OPTIONS[@]}" || :
+            session=$(tui_select --title 'Resume resolution' --inputbox 'Enter the session identifier shown in the list:' 0 0) || continue
+            [[ -n $session ]] || continue
+            tui_run 'Resumed dependency resolution' resume "$session" "${TUI_SESSION_OPTIONS[@]}" || :;;
         review|apply|verify)
             plan=$(tui_file 'Select a dependency plan' "${TUI_LAST_PLAN:-$PWD/}") || continue
             [[ -f $plan ]] || { tui_view --msgbox 'Select an existing plan.' 0 0; continue; }

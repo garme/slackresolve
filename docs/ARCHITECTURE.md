@@ -1,6 +1,6 @@
 # Architecture
 
-SlackResolve 0.3.3 has four entry paths and one shared dependency engine.
+SlackResolve 0.4.0 has four entry paths and one shared dependency engine.
 
 ## Entry paths
 
@@ -18,7 +18,24 @@ architectures must match the target exactly. An explicit `--arch` override is
 available for incomplete alternate roots. ELF providers are still required to
 match each consumer's class, machine, and endianness.
 
-When a requirement is unresolved, or when `search-file` is requested, the official adapter calls `slackpkg file-search`. Results are cross-referenced with the current `pkglist`; candidates are downloaded with `slackpkg download`, verified, unpacked into the analysis cache, and inspected. Generic searches require an exact basename or exact package path after download. Provider packages enter the same graph, so their ELF requirements are resolved recursively. A package with no dynamic ELF objects has no inferable ELF edges and remains a valid package operation.
+For official repositories, SlackResolve builds a persistent basename-to-package
+index from Slackware's `MANIFEST` and cross-references it with the current
+`pkglist`. Its cache key includes the release, architecture, and repository
+metadata state. A generic file that is not represented in the fast library
+map falls back to `slackpkg file-search`; that result is also cached under the
+same repository signature.
+
+Candidates are downloaded with `slackpkg download`, verified, unpacked into
+the content-addressed analysis cache, and inspected. Generic searches require
+an exact basename or exact package path after download. Provider packages
+enter the same graph, so their ELF requirements are resolved recursively. A
+package with no dynamic ELF objects has no inferable ELF edges and remains a
+valid package operation.
+
+Each graph pass collects all unresolved requirements. Providers that are
+unambiguous are deduplicated and added as one dependency round, avoiding a
+complete graph restart for every individual library. Ambiguous alternatives
+continue through the bounded backtracking search.
 
 Missing ELF requirements are prioritized independently from conservative
 package-script warnings. Therefore, a script that still requires review cannot
@@ -44,6 +61,19 @@ An upgrade enables a complete installed-system ELF audit against the overlay. Th
 A dependency-first order is saved with pinned archives, hashes, target guards, dependency evidence, and package actions. Ready plans contain no unresolved issues. Apply revalidates the plan and uses `installpkg` or `upgradepkg` according to the recorded action. A journal supports inspection and safe continuation after interruption.
 
 The CLI and `dialog` interface invoke the same backend. The terminal interface only chooses inputs, displays results, and confirms application; it never makes dependency decisions itself.
+
+## Persistent resolution sessions
+
+Every planning command saves its original argument vector, repository and
+system signatures, and selected package archives. Checkpoints are replaced
+atomically. Ctrl+C, TERM, or cancellation of the `dialog` gauge marks the
+session interrupted and preserves the most recent package selection.
+
+`slackresolve resume SESSION` reconstructs the original command without
+`eval` or shell sourcing. A matching repository, architecture, and installed
+system restores the checkpoint into the graph. If those guards changed, the
+graph is recalculated while content-addressed package and ELF caches remain
+available.
 
 ## Boundaries
 

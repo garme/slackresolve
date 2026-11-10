@@ -134,6 +134,7 @@ sr_overlay() {
 sr_graph() {
     : > "$SR_WORK/issues"; : > "$SR_WORK/edges"
     FIRST_CODE=; FIRST_PATH=; FIRST_NEED=; FIRST_REASON=
+    GRAPH_CONSUMER_EID=()
     sr_overlay
     if [[ ${SR_AUDIT_SYSTEM:-0} == 1 ]]; then sr_collect_system_roots; fi
     declare -a qpath=() qinherit=()
@@ -179,6 +180,7 @@ sr_graph() {
                 else
                     sr_record EDGE "$path" "$needed" '' '' "$DEP_STATUS" "$DEP_REASON" >> "$SR_WORK/edges"
                     sr_issue "$DEP_STATUS" "$path" "$needed" "$DEP_REASON"
+                    GRAPH_CONSUMER_EID["$path"$'\t'"$needed"]=$eid
                     if [[ $FIRST_CODE == missing && $FIRST_PATH == "$path" && $FIRST_NEED == "$needed" ]]; then FIRST_EID=$eid; fi
                 fi
             done
@@ -199,6 +201,31 @@ sr_graph() {
     # remains valid, while non-ELF runtime requirements stay outside coverage.
     [[ ! -s $SR_WORK/issues ]]
 }
+sr_batch_unique_missing() {
+    [[ ${SR_OFFLINE:-0} != 2 ]] || return 1
+    local line path need key consumer count rank id candidate_id added=0
+    declare -A seen=() add=()
+    while IFS= read -r line; do
+        sr_fields "$line"; [[ ${F[0]} == ISSUE && ${F[1]} == missing ]] || continue
+        path=${F[2]}; need=${F[3]}; [[ $need != */* ]] || continue
+        key=$path$'\t'$need; [[ ${seen[$key]+yes} ]] && continue; seen["$key"]=1
+        consumer=${GRAPH_CONSUMER_EID[$key]:-}; [[ -n $consumer ]] || continue
+        sr_candidates "$need" "$consumer"
+        count=0; id=; candidate_id=
+        while IFS=$'\t' read -r rank id; do
+            [[ -n $id ]] || continue; ((count+=1)); candidate_id=$id
+        done < "$SR_WORK/candidates"
+        (( count == 1 )) || continue
+        add["$candidate_id"]=1
+    done < "$SR_WORK/issues"
+    for id in "${!add[@]}"; do
+        [[ $'\n'$(printf '%s\n' "${SELECTED[@]}")$'\n' == *$'\n'$id$'\n'* ]] && continue
+        SELECTED+=("$id"); ((added+=1))
+    done
+    (( added > 0 )) || return 1
+    sr_log "Resolved one dependency round with $added unique provider package(s)."
+    sr_session_checkpoint "$(printf '%s\n' "${SELECTED[@]}")" || return 1
+}
 sr_selection_save() { printf '%s\n' "${SELECTED[@]}"; }
 sr_selection_restore() {
     SELECTED=(); local value
@@ -209,6 +236,10 @@ sr_solve() {
     ((SR_SEARCH_COUNT+=1))
     if (( SR_SEARCH_COUNT > SR_MAX_SEARCH || depth > 64 )); then SR_LIMIT_HIT=1; return; fi
     checkpoint=$(sr_selection_save)
+    sr_session_checkpoint "$checkpoint" || return
+    if [[ -n ${SLACKRESOLVE_TEST_INTERRUPT_DEPTH:-} && $depth == "$SLACKRESOLVE_TEST_INTERRUPT_DEPTH" ]]; then
+        kill -INT $$
+    fi
     if sr_graph; then
         local signature
         signature=$(printf '%s\n' "${SELECTED[@]}" | sort | sha256sum); signature=${signature:0:64}
@@ -218,6 +249,11 @@ sr_solve() {
     if (( depth > SR_BEST_DEPTH )); then
         SR_BEST_DEPTH=$depth; SR_BEST_SELECTED=$checkpoint
         cp -- "$SR_WORK/issues" "$SR_WORK/best-issues"
+    fi
+    if sr_batch_unique_missing; then
+        sr_solve "$((depth+1))"
+        sr_selection_restore "$checkpoint"
+        return 0
     fi
     code=$FIRST_CODE; need=$FIRST_NEED; consumer=${FIRST_EID:-}
     if [[ $code != missing || $need == */* || -z $consumer || ${SR_OFFLINE:-0} == 2 ]]; then return 0; fi

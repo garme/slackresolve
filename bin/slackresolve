@@ -4,9 +4,10 @@ set -o pipefail
 SR_BINDIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 if [[ -f $SR_BINDIR/../lib/common.sh ]]; then SR_LIBDIR=$SR_BINDIR/../lib
 else SR_LIBDIR=${SLACKRESOLVE_LIBDIR:-/usr/libexec/slackresolve/lib}; fi
-for sr_module in common elf archive repository loader solver plan; do
+for sr_module in common elf archive repository loader solver session plan; do
     source "$SR_LIBDIR/$sr_module.sh" || exit 1
 done
+SR_CLI_PATH=$SR_BINDIR/slackresolve
 sr_help() {
     cat <<'EOF'
 SlackResolve - find and install missing Slackware ELF dependencies
@@ -16,6 +17,9 @@ Usage:
   slackresolve search-file FILE [--output PLAN] [options]
   slackresolve check-system [--output PLAN] [options]
   slackresolve install PACKAGE|PACKAGE.txz [--output PLAN] [options]
+  slackresolve index [--rebuild] [options]
+  slackresolve sessions [--cache DIR]
+  slackresolve resume SESSION [--cache DIR]
   slackresolve show PLAN
   slackresolve apply PLAN [--dry-run]
   slackresolve verify PLAN
@@ -34,6 +38,7 @@ Options:
   --max-candidates N       Maximum provider archives examined (default: 64).
   --max-search N           Maximum dependency selections examined (default: 128).
   --dry-run                Validate an apply plan without changing the target.
+  --rebuild                Rebuild the cached official file-provider index.
   --version                Print the version.
 
 Planning never installs packages. Apply uses installpkg for additions and
@@ -43,21 +48,44 @@ EOF
 }
 [[ ${1:-} != --version ]] || { printf 'SlackResolve %s\n' "$SR_VERSION"; exit; }
 [[ $# -gt 0 && ${1:-} != --help && ${1:-} != -h ]] || { sr_help; exit; }
+SR_ORIGINAL_ARGS=("$@")
+if [[ $1 == sessions || $1 == resume ]]; then
+    sr_special=$1; shift
+    sr_special_cache=${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/slackresolve
+    sr_special_id=
+    while (( $# )); do
+        case $1 in
+            --cache) (( $# >= 2 )) || sr_die 'Missing value: --cache'; sr_special_cache=$2; shift 2;;
+            -*) sr_die "Unknown option: $1";;
+            *) [[ -z $sr_special_id ]] || sr_die 'Supply exactly one session identifier.'; sr_special_id=$1; shift;;
+        esac
+    done
+    sr_norm "$sr_special_cache"; sr_special_cache=$REPLY
+    mkdir -p -- "$sr_special_cache/sessions"
+    if [[ $sr_special == sessions ]]; then
+        [[ -z $sr_special_id ]] || sr_die 'sessions does not take an identifier.'
+        sr_sessions_list "$sr_special_cache"; exit
+    fi
+    [[ -n $sr_special_id ]] || sr_die 'Supply one resolution session identifier.'
+    sr_session_reexec "$sr_special_id" "$sr_special_cache"
+fi
 SR_COMMAND=$1; shift
 SR_ROOT=/; SR_ROOT_SET=0; SR_REPO=slackpkg; SR_OUTPUT=; SR_MAX_CANDIDATES=64; SR_MAX_SEARCH=128
-SR_DRY_RUN=0; SR_PREFER=; SR_AUDIT_SYSTEM=0; SR_ARCH_OVERRIDE=
+SR_DRY_RUN=0; SR_PREFER=; SR_AUDIT_SYSTEM=0; SR_ARCH_OVERRIDE=; SR_REBUILD_INDEX=0; SR_RESUME_SESSION=
 declare -a SR_INPUTS=()
 while (( $# )); do
     case $1 in
-        --root|--arch|--repo|--cache|--blacklist|--prefer|--slackpkg-data|--slackpkg-cache|--max-candidates|--max-search|--output)
+        --root|--arch|--repo|--cache|--blacklist|--prefer|--slackpkg-data|--slackpkg-cache|--max-candidates|--max-search|--output|--resume-session)
             (( $# >= 2 )) || sr_die "Missing value: $1"
             case $1 in
                 --root) SR_ROOT=$2; SR_ROOT_SET=1;; --arch) SR_ARCH_OVERRIDE=$2;; --repo) SR_REPO=$2;; --cache) SR_CACHE=$2;;
                 --blacklist) SR_BLACKLIST=$2;; --prefer) SR_PREFER=$2;;
                 --slackpkg-data) SR_SLACK_DATA=$2;; --slackpkg-cache) SR_SLACK_CACHE=$2;;
                 --max-candidates) SR_MAX_CANDIDATES=$2;; --max-search) SR_MAX_SEARCH=$2;; --output) SR_OUTPUT=$2;;
+                --resume-session) SR_RESUME_SESSION=$2;;
             esac; shift 2;;
         --dry-run) SR_DRY_RUN=1; shift;;
+        --rebuild) SR_REBUILD_INDEX=1; shift;;
         --help|-h) sr_help; exit;;
         --) shift; SR_INPUTS+=("$@"); break;;
         -*) sr_die "Unknown option: $1";;
@@ -87,6 +115,7 @@ case $SR_COMMAND in
         done
         [[ -f ${SR_SLACK_DATA:-/var/lib/slackpkg}/pkglist ]] && printf 'Slackpkg indexes: available\n' || printf 'Slackpkg indexes: unavailable; run slackpkg update.\n'
         exit 0;;
+    index) (( ${#SR_INPUTS[@]} == 0 )) || sr_die 'index does not take a package or program.';;
     check-program) (( ${#SR_INPUTS[@]} == 1 )) || sr_die 'Supply exactly one installed program.';;
     search-file) (( ${#SR_INPUTS[@]} == 1 )) || sr_die 'Supply exactly one filename or absolute package path.';;
     check-system) (( ${#SR_INPUTS[@]} == 0 )) || sr_die 'check-system does not take a program.';;
@@ -98,6 +127,11 @@ sr_init
 [[ $SR_RELEASE != unknown ]] || sr_log 'Warning: the target was not identified as Slackware.'
 sr_progress 5 'Reading official package indexes...'
 sr_repo_load
+if [[ $SR_COMMAND == index ]]; then
+    printf 'Repository signature: %s\nProvider index: %s\n' "$SR_REPO_SIGNATURE" "${SR_PROVIDER_INDEX:-not required for a local repository}"
+    exit 0
+fi
+sr_session_start
 
 if [[ $SR_COMMAND == search-file ]]; then
     sr_query=${SR_INPUTS[0]}
@@ -141,6 +175,8 @@ else
     printf 'Requested package: %s\n' "${PK_FULL[$A_ID]}"
 fi
 
+sr_session_restore
+
 sr_progress 25 'Checking libraries and locating official provider packages...'
 sr_solve 0
 mapfile -t SR_SOLUTIONS < <(find "$SR_WORK" -maxdepth 1 -type f -name 'solution.*' | sort)
@@ -176,4 +212,5 @@ else
     while IFS= read -r sr_line; do sr_fields "$sr_line"; printf 'PENDING %s: %s\n' "${F[1]}" "${F[4]}"; done < "$SR_WORK/issues"
 fi
 sr_progress 100 'Analysis completed.'
+sr_session_finish "$SR_STATUS" || sr_die 'Could not finalize the resolution session.'
 [[ $SR_STATUS == ready ]]

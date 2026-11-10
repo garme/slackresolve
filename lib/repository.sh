@@ -10,6 +10,48 @@ sr_repo_add() {
     REPO_IDS+=("$id"); RP_PATH["$id"]=$path; RP_RANK["$id"]=$rank
     RP_ORIGIN["$id"]=$origin; RP_FULL["$id"]=$fullname
     RP_BASE["$id"]=$P_BASE; RP_ARCH["$id"]=$arch
+    RP_BY_FULL["$fullname"]=$id
+}
+sr_repository_signature() {
+    local repo=${SR_REPO:-slackpkg} value
+    if [[ $repo == slackpkg ]]; then
+        value=$({
+            printf '%s\n' "$SR_RELEASE" "$SR_TARGET_ARCH"
+            find "$SR_SLACK_DATA" -maxdepth 2 -type f \
+                \( -name pkglist -o -name CHECKSUMS.md5 -o -iname '*manifest*' \) \
+                -printf '%P\t%s\t%T@\n' 2>/dev/null | sort
+        } | sha256sum) || return
+    else
+        value=$({
+            printf '%s\n' "$repo" "$SR_TARGET_ARCH"
+            find "$repo" -type f \( -name '*.txz' -o -name '*.tgz' -o -name '*.tlz' -o -name '*.tbz' \) \
+                -printf '%P\t%s\t%T@\n' 2>/dev/null | sort
+        } | sha256sum) || return
+    fi
+    SR_REPO_SIGNATURE=${value:0:64}
+}
+sr_provider_index_load() {
+    local index_dir index tmp file full name rid
+    index_dir=$SR_CACHE/indexes/$SR_REPO_SIGNATURE
+    index=$index_dir/providers.tsv
+    mkdir -p -- "$index_dir" || return 1
+    if [[ ${SR_REBUILD_INDEX:-0} == 1 ]]; then rm -f -- "$index"; fi
+    if [[ ! -f $index ]]; then
+        tmp=$(mktemp "$index_dir/providers.XXXXXXXX") || return 1
+        while IFS= read -r -d '' file; do
+            if [[ $file == *.bz2 ]]; then bzip2 -dc -- "$file"; else cat -- "$file"; fi
+        done < <(find "$SR_SLACK_DATA" -maxdepth 2 -type f -iname '*manifest*' -print0) |
+            awk 'BEGIN{OFS="\t"} /Package:/ {for(i=1;i<=NF;i++)if($i=="Package:"){p=$(i+1);sub(/^.*\//,"",p);sub(/\.(t[gxbl]z|tbz)$/,"",p)}} /^[l-]/ {s=$0;for(i=1;i<=5;i++)sub(/^[^ \t]+[ \t]+/,"",s);sub(/ -> .*/,"",s);sub(/^.*\//,"",s);if(length(p)&&length(s))print p,s}' |
+            sort -u > "$tmp" || { rm -f -- "$tmp"; return 1; }
+        mv -- "$tmp" "$index" || return 1
+    fi
+    while IFS=$'\t' read -r full name; do
+        [[ -n $full && -n $name ]] || continue
+        rid=${RP_BY_FULL[$full]:-}; [[ -n $rid ]] || continue
+        RP_MANIFEST["$rid"]+="$name"$'\n'
+        if [[ $name == *.so || $name == *.so.* ]]; then PROVIDER_RIDS["$name"]+="$rid"$'\n'; fi
+    done < "$index"
+    SR_PROVIDER_INDEX=$index
 }
 sr_repo_load() {
     local repo=${SR_REPO:-slackpkg} file rel rank line full arch area name version build ext location
@@ -30,31 +72,19 @@ sr_repo_load() {
             sr_priority "$area"; rank=$REPLY; (( rank < 90 )) || continue
             sr_repo_add "$full.$ext" "$rank" slackpkg "$full" "$arch"
         done < "$SR_SLACK_DATA/pkglist"
-        # MANIFEST is only a provider hint. The archive is always inspected.
-        while IFS= read -r -d '' file; do
-            if [[ $file == *.bz2 ]]; then bzip2 -dc -- "$file"; else cat -- "$file"; fi
-        done < <(find "$SR_SLACK_DATA" -maxdepth 2 -type f -iname '*manifest*' -print0) |
-            awk 'BEGIN{OFS="\t"} /Package:/ {for(i=1;i<=NF;i++)if($i=="Package:"){p=$(i+1);sub(/^.*\//,"",p);sub(/\.(t[gxbl]z|tbz)$/,"",p)}} /^[l-]/ && /\.so/ {s=$0;for(i=1;i<=5;i++)sub(/^[^ \t]+[ \t]+/,"",s);sub(/ -> .*/,"",s);sub(/^.*\//,"",s);if(length(p)&&length(s))print p,s}' > "$SR_WORK/manifest"
-        while IFS=$'\t' read -r full name; do
-            for file in "${REPO_IDS[@]}"; do
-                [[ ${RP_FULL[$file]} != "$full" ]] || RP_MANIFEST["$file"]+="$name"$'\n'
-            done
-        done < "$SR_WORK/manifest"
     fi
+    sr_repository_signature || sr_die 'Could not identify the repository state.'
+    if [[ $repo == slackpkg ]]; then sr_provider_index_load || sr_die 'Could not build the official file-provider index.'; fi
 }
 sr_hash_string() { local value; value=$(printf '%s' "$1" | sha256sum); REPLY=${value:0:64}; }
 sr_fetch() {
     local rid=$1 file cached full=${RP_FULL[$1]} name=${RP_PATH[$1]##*/}
     sr_blocked "$full" && { sr_log "Excluded by blacklist: $full"; return 1; }
+    if [[ ${RP_FETCHED_ID[$rid]+yes} ]]; then A_ID=${RP_FETCHED_ID[$rid]}; return 0; fi
     if [[ ${RP_ORIGIN[$rid]} == local ]]; then
         file=${RP_PATH[$rid]}
     else
         command -v slackpkg >/dev/null || { sr_log 'slackpkg is not available.'; return 1; }
-        sr_log "Downloading $full with slackpkg..."
-        if ! slackpkg -batch=on -default_answer=y -dialog=off -checkgpg=on -checkmd5=on download "$full" >> "$SR_WORK/download.log" 2>&1; then
-            sr_log "slackpkg failed for $full. See $SR_WORK/download.log while this command is running."
-            return 1
-        fi
         file=
         while IFS= read -r -d '' cached; do
             [[ ${cached##*/} == "$name" ]] || continue
@@ -63,6 +93,20 @@ sr_fetch() {
             fi
             file=$cached
         done < <(find "$SR_SLACK_CACHE" -type f -name "$name" -print0)
+        if [[ -z $file ]]; then
+            sr_log "Downloading $full with slackpkg..."
+            if ! slackpkg -batch=on -default_answer=y -dialog=off -checkgpg=on -checkmd5=on download "$full" >> "$SR_WORK/download.log" 2>&1; then
+                sr_log "slackpkg failed for $full. See $SR_WORK/download.log while this command is running."
+                return 1
+            fi
+            while IFS= read -r -d '' cached; do
+                [[ ${cached##*/} == "$name" ]] || continue
+                if [[ -n $file ]] && ! cmp -s -- "$file" "$cached"; then
+                    sr_log "Conflicting cached archives for $name"; return 1
+                fi
+                file=$cached
+            done < <(find "$SR_SLACK_CACHE" -type f -name "$name" -print0)
+        else sr_log "Reusing cached package $full..."; fi
         [[ -n $file ]] || { sr_log "Downloaded archive was not found: $name"; return 1; }
         # Independently check the exact bytes against slackpkg's signed list.
         local expected actual
@@ -78,6 +122,7 @@ sr_fetch() {
     fi
     sr_archive "$file" "${RP_ORIGIN[$rid]}" || return 1
     [[ ${PK_FULL[$A_ID]} == "$full" ]] || { sr_log "Unexpected package identity: ${PK_FULL[$A_ID]}"; return 1; }
+    RP_FETCHED_ID["$rid"]=$A_ID
 }
 sr_repo_input() {
     local query=$1 rid min=100 best= count=0 rank
@@ -91,17 +136,28 @@ sr_repo_input() {
     sr_fetch "$best"
 }
 sr_slackpkg_file_search() {
-    local needed=$1 rid output=$SR_WORK/slackpkg-file-search
+    local needed=$1 rid output=$SR_WORK/slackpkg-file-search full cache key
     : > "$SR_WORK/slackpkg-provider-ids"
-    command -v slackpkg >/dev/null || { sr_log 'slackpkg is not available for file-search.'; return 1; }
-    sr_log "Searching official Slackware packages for $needed..."
-    slackpkg -batch=on -dialog=off file-search "$needed" > "$output" 2>&1 || :
-    for rid in "${REPO_IDS[@]}"; do
-        [[ ${RP_ORIGIN[$rid]} == slackpkg ]] || continue
-        if awk -v full="${RP_FULL[$rid]}" '$NF==full {found=1} END{exit !found}' "$output"; then
-            printf '%s\n' "$rid" >> "$SR_WORK/slackpkg-provider-ids"
-        fi
-    done
+    if [[ -n ${PROVIDER_RIDS[$needed]:-} ]]; then
+        printf '%s' "${PROVIDER_RIDS[$needed]}" | sort -u > "$SR_WORK/slackpkg-provider-ids"
+        return 0
+    fi
+    sr_hash_string "$needed"; key=$REPLY
+    cache=$SR_CACHE/searches/$SR_REPO_SIGNATURE/$key.tsv
+    mkdir -p -- "${cache%/*}"
+    if [[ ! -f $cache ]]; then
+        local tmp
+        tmp=$(mktemp "${cache%/*}/search.XXXXXXXX") || return 1
+        command -v slackpkg >/dev/null || { sr_log 'slackpkg is not available for file-search.'; return 1; }
+        sr_log "Searching official Slackware packages for $needed..."
+        slackpkg -batch=on -dialog=off file-search "$needed" > "$output" 2>&1 || :
+        awk '/^\[(installed|uninstalled|upgrade)[^]]*\][ \t]+-[ \t]+/ {print $NF}' "$output" | sort -u > "$tmp"
+        mv -- "$tmp" "$cache" || return 1
+    fi
+    while IFS= read -r full; do
+        rid=${RP_BY_FULL[$full]:-}; [[ -n $rid ]] || continue
+        printf '%s\n' "$rid" >> "$SR_WORK/slackpkg-provider-ids"
+    done < "$cache"
     [[ -s $SR_WORK/slackpkg-provider-ids ]]
 }
 sr_package_file_match() {
